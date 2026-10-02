@@ -5,6 +5,10 @@ Rules (see README):
   * SOFT    — words that also read as ordinary auspicious or descriptive words, and bare urban-district
               names. These count in the seven central districts; elsewhere only when at least two
               other place-named roads of the same province (or three of the same region) lie within 3.5 km.
+Each kept road records its basis: 'distinct' (the name only reads as this place), 'core' (a SOFT word kept
+because it is in a central district), 'cluster' (a SOFT word kept because of same-province neighbours) or
+'ambiguous' (several provinces have a place of this name; picked by PREFER or the neighbours). All but
+'distinct' are inferences and are flagged as such on the page.
 Output: work/kept.json, work/meta.json, data/roads.csv
 """
 import collections
@@ -84,15 +88,17 @@ def neighbours(r, radius=3.5):
 
 
 def pick(stem, near):
+    """Best match for a stem, and whether other provinces had an equally good claim to it."""
     ms = sorted(G[stem], key=lambda m: m[0])
+    tied = [m for m in ms if m[0] == ms[0][0]]
+    ambiguous = len(set(m[1] for m in tied)) > 1
     if stem in PREFER:
         for m in ms:
             if m[1] == PREFER[stem]:
-                return m
-    tied = [m for m in ms if m[0] == ms[0][0]]
+                return m, True
     if len(tied) > 1 and near:
         tied.sort(key=lambda m: -near.get(m[1], 0))
-    return tied[0]
+    return tied[0], ambiguous
 
 
 kept, dropped = [], []
@@ -106,9 +112,16 @@ for r in cand:
             dropped.append(r)
             continue
         m = sorted(ok, key=lambda m: (-near.get(m[1], 0), -near.get('R:' + REGION.get(m[1], '?'), 0), m[0]))[0]
+        basis = 'cluster'
     else:
-        m = pick(b, near)
+        m, ambiguous = pick(b, near)
+        basis = 'core' if is_soft(b) else 'ambiguous' if ambiguous else 'distinct'
     tier, prov, full, ll = m
+    # what a 'cluster' entry leans on: same-province (or else same-region) place-named roads within 3.5 km
+    nearby = ''
+    if basis == 'cluster':
+        n_prov, reg = near.get(prov, 0), REGION.get(prov, '')
+        nearby = f'{n_prov} 条同省' if n_prov >= 2 else f'{near.get("R:" + reg, 0)} 条{reg}地区'
     if prov == '旧省':
         prov = OLD_PROVINCE[b]
     if tier == 0:
@@ -120,7 +133,7 @@ for r in cand:
         label = full if (tier == 1 or not parent or parent == full) else parent + full
         kind = 'C'
     kept.append({'name': r['name'], 'base': b, 'prov': prov, 'label': label, 'kind': kind, 'tier': tier,
-                 'district': r['district'], 'pt': r['pt'], 'll': ll, 'len': r['len']})
+                 'district': r['district'], 'pt': r['pt'], 'll': ll, 'len': r['len'], 'basis': basis, 'near': nearby})
 
 save_json(kept, work('kept.json'))
 names = set(r['name'] for r in R)
@@ -136,15 +149,20 @@ CITY_LEVEL = {'北京', '天津', '重庆', '香港', '澳门'}
 kept_keys = {(k['name'], k['district']) for k in kept}
 with open(os.path.join(DATA, 'roads.csv'), 'w', newline='', encoding='utf-8-sig') as f:
     w = csv.writer(f)
-    w.writerow(['路名', '所在区', '匹配地名', '省级行政区', '对应行政区', '结果', '说明'])
+    w.writerow(['路名', '所在区', '匹配地名', '省级行政区', '对应行政区', '结果', '说明', '判定'])
+    BASIS = {'distinct': '名称独特',
+             'core': '推断：也是常见字眼或市辖区名，位于中心城区',
+             'cluster': '推断：也是常见字眼，附近 3.5 公里内有 {}地名路',
+             'ambiguous': '推断：多个省份有同名地方，按周边道路或惯例选定'}
     for k in sorted(kept, key=lambda k: (k['prov'], k['base'], k['name'])):
         kind = '省名' if k['kind'] == 'P' and k['prov'] not in CITY_LEVEL else '城市/县名'
-        w.writerow([k['name'], k['district'], k['base'], k['prov'], k['label'], '收录', kind])
+        w.writerow([k['name'], k['district'], k['base'], k['prov'], k['label'], '收录', kind, BASIS[k['basis']].format(k['near'])])
     rest = [r for r in R if r['base'] and (r['name'], r['district']) not in kept_keys]
     for r in sorted(rest, key=lambda r: (r['base'], r['name'])):
         why = ('常见词/本地地名/山河湖海' if r['base'] in EXCLUDE else
                '长度过短' if r['len'] < 0.06 else '吉祥字眼，所在区无同省地名成片')
-        w.writerow([r['name'], r['district'], r['base'], '', '', '未收录', why])
+        w.writerow([r['name'], r['district'], r['base'], '', '', '未收录', why, ''])
 
 print('kept', len(kept), 'instances,', meta['kept'], 'names,', meta['places'], 'places; dropped soft', len(dropped))
 print(collections.Counter(k['district'] for k in kept).most_common())
+print('basis', collections.Counter(k['basis'] for k in kept).most_common())

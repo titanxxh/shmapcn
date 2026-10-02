@@ -2,9 +2,13 @@
 
 上海有 800 多个路名取自全国各地的省、市、县。这个项目把上海的全部路名与全国行政区名逐一比对，并用一张双层三维地图展示映射关系：上层是中国，下层是上海，彩色细线把每座城市连到以它命名的道路，颜色区分省份。
 
-**在线查看：** https://titanxxh.github.io/shmapcn/
+**在线查看：** https://titanxxh.github.io/shmapcn/ （右上角可切换英文版 / English: [`?lang=en`](https://titanxxh.github.io/shmapcn/?lang=en)）
 
-可拖动旋转；点上层的省份或下层的区（也可用页面上的按钮），对应的连线会被点亮，下层地图会自动缩放到所选的区或道路范围；在下层上海地图上可滚轮缩放、拖动平移，并可在“中心放大”与“真实比例”之间切换。
+- 拖动旋转；点上层的省份或下层的区（也可用页面上的按钮），对应的连线会被点亮，下层地图会自动缩放到所选的区或道路范围。
+- 在下层上海地图上可滚轮或双指捏合缩放、拖动平移，并可在“中心放大”与“真实比例”之间切换。
+- 鼠标移到圆点上，会高亮这条连线并显示道路与地名；点击圆点可把卡片固定住。
+- 对照表、选中列表和方位规律卡片里的路名都可以点，地图会定位到这条路；搜索框的结果会同时在地图上点亮。
+- 当前的选择、搜索、固定的道路、比例、缩放、视角和语言都写在网址里，复制地址即可分享同一画面，例如 [`?s=z:闵行&proj=lin`](https://titanxxh.github.io/shmapcn/?s=z:%E9%97%B5%E8%A1%8C&proj=lin)。
 
 ## 结果
 
@@ -18,7 +22,9 @@
 
 除了外滩一带“南北向用省名、东西向用城市名”的老规则，方位对应一直延伸到郊区：杨浦、宝山是东北三省，原闸北、普陀是山西、陕西，徐汇是广西，长宁是贵州，浦东是山东；嘉定集中了新疆、甘肃，闵行是云南，金山石化一带是广西。
 
-完整比对表见 [`data/roads.csv`](data/roads.csv)（收录与未收录均列出，未收录的附原因），反向核对见 [`data/reverse-check.csv`](data/reverse-check.csv)。
+完整比对表见 [`data/roads.csv`](data/roads.csv)（收录与未收录均列出，未收录的附原因，收录的附判定依据），反向核对见 [`data/reverse-check.csv`](data/reverse-check.csv)。
+
+819 个路名中，有 154 处道路的对应依靠下文第 3 步的规则判定（名称本身也是常见字眼，或多个省份都有同名地方），网页上标为“推断”，并说明依据。
 
 ## 方法
 
@@ -28,15 +34,19 @@
    - 排除常见词与口号（中山、和平、解放、新华、朝阳……）、上海本地地名（宝山、普陀、龙华、华亭……）、山河湖海（天山、衡山、怒江、苏州河……）。
    - “永安”“长兴”这类本身也是吉祥字眼的县名，以及一般的市辖区名，只在中心城区七个区计入；在郊区，只有附近 3.5 公里内有同省地名成片出现时才计入（例如闵行的云南县名群）。
    - 同名多处（如“通州”）优先取周边道路所属的省份。
+   - 依靠这几条规则收录的道路，在 `roads.csv` 的“判定”一栏和网页上标为“推断”。
 4. **反向核对**（`scripts/reverse.py`）：以 GB/T 2260 中全部 333 个地级行政区和 396 个县级市逐一反查上海全部路名（包括公路、弄、桥），未发现新的遗漏——多出来的匹配都是已收录道路的支弄、地道和桥，以地名缩写命名的公路，或偶然包含该字样的路名；锦州湾路、大凉山路以海湾和山脉命名，按规则不计入。
 
-路名与地名的对应由名称推断，个别道路可能另有出处，欢迎提 issue 指正。
+路名与地名的对应由名称推断，个别道路可能另有出处，欢迎提 issue 指正（网页上每条道路的卡片里都有预先填好的 issue 链接）。
+
+“方位规律”各卡片的历史说明摘自新闻报道、上海档案信息网、上海市民政局和区政府网站等，卡片上附有来源链接。
 
 ## 目录
 
 ```
-index.html, assets/      网页（纯 HTML/CSS/JS，无需构建）
+index.html, assets/      网页（纯 HTML/CSS/JS，无需构建；文案与英文翻译在 assets/i18n.js）
 data/geo.json            网页使用的地图与道路数据
+data/en.json             英文版的路名与地名（拼音），与 geo.json 的道路逐条对应
 data/roads.csv           全部候选的比对结果
 data/reverse-check.csv   地级市、县级市反向核对结果
 scripts/                 数据处理流程
@@ -49,13 +59,14 @@ scripts/                 数据处理流程
 
 ```bash
 pip install -r scripts/requirements.txt
-bash scripts/fetch_sources.sh      # 行政区划与地图边界（npm 上的公开数据包）→ sources/
+bash scripts/fetch_sources.sh      # 行政区划、地图边界与拼音库（npm 上的公开数据包）→ sources/
 cd scripts
 python3 fetch_overture.py          # 上海全部道路 → work/segments.jsonl（只按需下载相关数据块）
 python3 match.py                   # 正向比对 → work/roads_all.json
 python3 classify.py                # 规则过滤 → work/kept.json, data/roads.csv
 python3 reverse.py                 # 反向核对 → data/reverse-check.csv
 node build_geo.js                  # 地图投影 → data/geo.json
+node build_en.js                   # 英文路名与地名 → data/en.json
 ```
 
 本地预览：在仓库根目录运行 `python3 -m http.server`，打开 http://localhost:8000 。
@@ -66,5 +77,6 @@ node build_geo.js                  # 地图投影 → data/geo.json
 - 全国省级边界与南海诸岛插图：[Apache ECharts](https://echarts.apache.org/) 4.9 地图数据（Apache-2.0）。
 - 区县边界与中心点：[echarts-china-counties-js](https://www.npmjs.com/package/echarts-china-counties-js)（MIT）。
 - 行政区划代码与名称：[province-city-china](https://github.com/uiwjs/province-city-china)（MIT，GB/T 2260）。
+- 英文版拼音：生成时使用 [pinyin-pro](https://github.com/zh-lx/pinyin-pro)（MIT），并对多音字地名做了人工校正。
 
 代码以 MIT 许可发布，见 [LICENSE](LICENSE)。
