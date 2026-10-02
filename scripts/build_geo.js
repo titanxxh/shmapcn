@@ -137,19 +137,23 @@ const FISH = shanghaiPlane(fish), LIN = shanghaiPlane(linear);
 const K = JSON.parse(fs.readFileSync(path.join(WORK, 'kept.json'), 'utf8'));
 const OLD = { 西康: [101.96, 30.05], 热河: [117.94, 40.95], 察哈尔: [114.88, 40.82], 绥远: [111.75, 40.84] };
 const DS = { 黄浦区: '黄浦', 静安区: '静安', 徐汇区: '徐汇', 长宁区: '长宁', 普陀区: '普陀', 虹口区: '虹口', 杨浦区: '杨浦', 浦东新区: '浦东', 宝山区: '宝山', 闵行区: '闵行', 嘉定区: '嘉定', 松江区: '松江', 青浦区: '青浦', 奉贤区: '奉贤', 金山区: '金山', 崇明区: '崇明' };
+// '10 条同省' -> '10', '3 条华东地区' -> '3:华东' (neighbours a 'cluster' entry relies on)
+const nearCode = (s) => { const m = /^(\d+) 条(?:同省|(.+)地区)$/.exec(s || ''); return m ? m[1] + (m[2] ? ':' + m[2] : '') : ''; };
 const roads = K.map((k) => {
   let ll = k.ll;
   if (OLD[k.base]) ll = OLD[k.base];
   else if (!ll) ll = provCP[k.prov];
   const [cu, cv] = cnProj(ll), [su, sv] = FISH.pt(k.pt), [lu, lv] = LIN.pt(k.pt);
-  return [k.name, k.base, k.prov, k.label, k.kind === 'P' ? 1 : 0, DS[k.district], r1(cu), r1(cv), r1(su), r1(sv), r1(lu), r1(lv)];
+  // basis: '' = the name only reads as this place; otherwise an inference ('core' / 'cluster' / 'ambiguous', see classify.py)
+  return [k.name, k.base, k.prov, k.label, k.kind === 'P' ? 1 : 0, DS[k.district], r1(cu), r1(cv), r1(su), r1(sv), r1(lu), r1(lv),
+    k.basis === 'distinct' ? '' : k.basis, nearCode(k.near)];
 }).sort((a, b) => a[0].localeCompare(b[0], 'zh'));
 const meta = JSON.parse(fs.readFileSync(path.join(WORK, 'meta.json'), 'utf8'));
 const revPath = path.join(WORK, 'reverse.json');
 if (fs.existsSync(revPath)) meta.reverse = JSON.parse(fs.readFileSync(revPath, 'utf8'));
 const OUT = path.join(ROOT, 'data', 'geo.json');
-// roads: [name, stem, province, place label, named-after-province, district, china u, v, fisheye u, v, linear u, v]
+// roads: [name, stem, province, place label, named-after-province, district, china u, v, fisheye u, v, linear u, v, basis, nearby]
 const plane = ({ w, h, shd, river }) => ({ w, h, shd, river });
-const geo = { v: 3, cw: CW, ch: CH, cn: cnOut, nh: ringsToPath(nh.map((r) => r.map(cnProj))), fish: plane(FISH), lin: plane(LIN), roads, meta };
+const geo = { v: 4, cw: CW, ch: CH, cn: cnOut, nh: ringsToPath(nh.map((r) => r.map(cnProj))), fish: plane(FISH), lin: plane(LIN), roads, meta };
 fs.writeFileSync(OUT, JSON.stringify(geo));
 console.log('fisheye plane', FISH.w, 'x', FISH.h, '| linear plane', LIN.w, 'x', LIN.h, '| RMAX km', RMAX.toFixed(1), '| roads', roads.length, '| bytes', fs.statSync(OUT).size);

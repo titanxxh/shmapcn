@@ -1,5 +1,6 @@
 /* 上海路名里的中国 — two-layer 3D map (China above, Shanghai below) with threads from each city to the
-   roads named after it. Plain JS, no build step; data comes from data/geo.json (see scripts/). */
+   roads named after it. Plain JS, no build step; data comes from data/geo.json (and data/en.json for the
+   English version, see scripts/). Strings live in assets/i18n.js. */
 (() => {
   'use strict';
 
@@ -11,6 +12,8 @@
   const VW = 1200, VH = 940;
   const DEFAULT_VIEW = { az: -24, el: 30 };
   const ROWS_COLLAPSED = 6;
+  const MAX_ZOOM = 40;
+  const REPO = 'https://github.com/titanxxh/shmapcn';
 
   // province -> [abbreviation, region, colour]; colours stay ≥4.5:1 against the ink used for chip text
   const P = {
@@ -49,12 +52,14 @@
     cew: (r) => EW.includes(r.name),
   };
 
-  const state = { sel: null, az: DEFAULT_VIEW.az, el: DEFAULT_VIEW.el, q: '', open: {}, proj: 'fish' };
-  // 2D view inside the Shanghai board: zoom k around map point (cx, cy), in plane units
-  let zoom = { k: 1, cx: 0, cy: 0 };
-  let botMatrix = null;   // board -> SVG coordinates from the last render, for wheel / pan hit tests
-  const MAX_ZOOM = 40;
-  let D = null;
+  // sel: a province ('p'), a region ('r') or a Shanghai district ('z'); focus: one road ('road') or city ('city')
+  const state = { sel: null, focus: null, az: DEFAULT_VIEW.az, el: DEFAULT_VIEW.el, q: '', open: {}, proj: 'fish', lang: 'zh' };
+  let hover = null;                     // like focus, plus 'zone' / 'prov' while the mouse is over them
+  let zoom = { k: 1, cx: 0, cy: 0 };    // 2D view inside the Shanghai board: zoom k around map point (cx, cy)
+  let zoomTouched = false;              // the user zoomed or panned since the last automatic fit
+  let botMatrix = null;                 // board -> SVG coordinates from the last frame, for hit tests
+  let D = null, EN = null, sk = null;   // data, English names, SVG skeleton
+  let lastPointer = null;
 
   // ---------- helpers ----------
   const $ = (s) => document.querySelector(s);
@@ -63,26 +68,55 @@
   const f1 = (n) => Math.round(n * 10) / 10;
   const wrapDeg = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
   const shortZone = (n) => n.replace(/新区$|区$/, '');
-  const zh = (a, b) => a.localeCompare(b, 'zh');
-  const byProv = (a, b) => ORDER.indexOf(a.prov) - ORDER.indexOf(b.prov) || zh(a.name, b.name);
+  const norm = (s) => s.trim().toLowerCase().replace(/[\s'’-]/g, '');
+  const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const isEn = () => state.lang === 'en' && !!EN;
+  const L = () => (isEn() ? window.I18N.en : window.I18N.zh);
+  const T = (key, ...a) => { const v = L().ui[key]; return typeof v === 'function' ? v(...a) : v; };
+
+  // names in the current language
+  const provName = (p) => (isEn() ? window.I18N.en.prov[p] || p : p);
+  const provAbbr = (p) => (isEn() ? window.I18N.en.code[p] : P[p][0]);
+  const regionName = (r) => (isEn() ? window.I18N.en.region[r] : r);
+  const zoneName = (z) => (isEn() ? window.I18N.en.zone[z] : z);
+  const zoneFull = (z) => T('zoneFull', z);
+  const roadName = (r) => (isEn() ? r.en[0] : r.name);
+  const placeShort = (r) => (isEn() ? r.en[1] : r.isP ? r.prov : r.label);   // 南京市 / Nanjing
+  const placeFull = (r) => (isEn() ? (r.isP ? r.en[1] : r.en[1] + (r.en[2] ? ', ' + r.en[2] : '')) : r.isP ? T('provNamed', r.prov) : r.label + '（' + r.prov + '）');
+  const cityName = (c) => (isEn() ? c.en.replace(/ \(.*\)$/, '') : c.name);
+  const cmpText = (a, b) => a.localeCompare(b, isEn() ? 'en' : 'zh');
+  const byProv = (a, b) => ORDER.indexOf(a.prov) - ORDER.indexOf(b.prov) || cmpText(roadName(a), roadName(b));
   const byZone = (a, b) => ZORDER.indexOf(a.zone) - ZORDER.indexOf(b.zone) || byProv(a, b);
-  // the current selection is a province ('p'), a region ('r') or a Shanghai district ('z')
-  const roadOn = (r) => {
+  const planeXY = (r) => (state.proj === 'lin' ? [r.lu, r.lv] : [r.su, r.sv]);
+  const plane = () => (state.proj === 'lin' ? D.g.lin : D.g.fish);
+  const selOk = (r) => {
     const s = state.sel;
     if (!s) return true;
     if (s.t === 'p') return r.prov === s.id;
     if (s.t === 'r') return P[r.prov][1] === s.id;
     return r.zone === s.id;
   };
-  const isOn = (prov) => {
-    const s = state.sel;
-    if (!s) return true;
-    if (s.t === 'p') return prov === s.id;
-    if (s.t === 'r') return !!P[prov] && P[prov][1] === s.id;
-    return !!(D.zoneProv[s.id] && D.zoneProv[s.id][prov]);
-  };
-  const zoneFull = (z) => (z === '浦东' ? '浦东新区' : z + '区');
+  const isOn = (prov) => !D.filtered || !!D.provOn[prov];
+  const same = (a, b) => !!a && !!b && a.t === b.t && (a.t === 'road' ? a.i === b.i : a.t === 'city' ? a.key === b.key : a.id === b.id);
+  const roadsOf = (f) => (!f ? [] : f.t === 'road' ? [D.roads[f.i]] : f.t === 'city' ? D.cities.get(f.key).roads.map((i) => D.roads[i]) : []);
   const pts = (ps) => ps.map(([x, y]) => f1(x) + ',' + f1(y)).join(' ');
+  const circ = (x, y, r) => `M${f1(x - r)} ${f1(y)}a${r} ${r} 0 1 0 ${f1(2 * r)} 0a${r} ${r} 0 1 0 ${f1(-2 * r)} 0`;
+
+  function basisText(r) {
+    const b = isEn() ? `${r.base} (${r.en[1].replace(/ \(.*\)$/, '')})` : r.base;
+    if (r.basis === 'core') return T('basisCore', b);
+    if (r.basis === 'cluster') { const [n, reg] = r.near.split(':'); return T('basisCluster', b, Number(n), reg || ''); }
+    if (r.basis === 'ambiguous') return T('basisAmbiguous', b, placeShort(r));
+    return '';
+  }
+  const infTag = (r) => (r.basis ? `<span class="inf" title="${esc(basisText(r))}">${T('inferredShort')}</span>` : '');
+  function issueURL(r) {
+    const name = isEn() ? `${r.name} ${r.en[0]}` : r.name;
+    return REPO + '/issues/new?' + new URLSearchParams({
+      title: T('reportTitle', name, zoneFull(r.zone)),
+      body: T('reportBody', name, zoneFull(r.zone), placeFull(r), basisText(r)),
+    }).toString();
+  }
 
   function hull(points) {
     const p = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -94,138 +128,410 @@
     return lo.concat(up);
   }
 
+  // ---------- which roads are lit ----------
+  function computeOn() {
+    const q = norm(state.q);
+    D.provOn = {};
+    D.nOn = 0;
+    for (const r of D.roads) {
+      r.on = selOk(r) && (!q || r.hay.includes(q) || (!!EN && r.hayEn.includes(q)));
+      if (r.on) { D.nOn++; D.provOn[r.prov] = true; }
+    }
+    for (const c of D.cities.values()) c.on = c.roads.some((i) => D.roads[i].on);
+    D.filtered = !!state.sel || !!q;
+  }
+
+  // ---------- labels: greedy placement, highest priority first; a label that fits nowhere is dropped ----------
+  const textW = (s, size, ls) => { let w = 0; for (const ch of s) w += ch.charCodeAt(0) > 0x2e80 ? size : /[A-Z]/.test(ch) ? size * 0.66 : size * 0.54; return w + ls * size * s.length; };
+  function placeLabels(cands) {
+    cands.sort((a, b) => b.pri - a.pri);
+    const boxes = [], out = [];
+    for (const c of cands) {
+      const w = textW(c.text, c.size, c.ls || 0), h = c.size;
+      for (const [dx, dy, anchor] of c.alts) {
+        const x = c.x + dx, y = c.y + dy;
+        const x0 = anchor === 'middle' ? x - w / 2 : anchor === 'end' ? x - w : x;
+        const b = [x0 - 2, y - h * 0.9 - 1, x0 + w + 2, y + h * 0.25 + 1];
+        if (boxes.some((o) => o[0] < b[2] && b[0] < o[2] && o[1] < b[3] && b[1] < o[3])) continue;
+        boxes.push(b);
+        out.push({ key: c.key, x, y, text: c.text, attrs: { class: 'lbl' + (c.cls ? ' ' + c.cls : ''), 'text-anchor': anchor, fill: c.fill, opacity: c.op,
+          style: `font-size:${c.size}px;font-weight:${c.weight}${c.ls ? `;letter-spacing:${c.ls}em` : ''}` } });
+        break;
+      }
+    }
+    return out;
+  }
+  // Labels live in an HTML layer over the SVG (in view-box units, scaled with it) and are only moved with
+  // CSS transforms: SVG text would need a fresh text layout every frame.
+  function syncLabels(layer, items) {
+    const pool = layer.pool || (layer.pool = new Map());
+    const seen = new Set();
+    for (const it of items) {
+      const a = it.attrs, sig = it.text + '|' + a.class + '|' + a.style + '|' + a.fill + '|' + a.opacity;
+      let e = pool.get(it.key);
+      if (!e || e.sig !== sig) {
+        if (e) e.remove();
+        e = document.createElement('span');
+        e.className = a.class;
+        e.style.cssText = a.style + ';color:' + a.fill + (a.opacity != null ? ';opacity:' + a.opacity : '');
+        e.textContent = it.text;
+        e.sig = sig;
+        pool.set(it.key, e);
+        layer.appendChild(e);
+      }
+      const ax = a['text-anchor'] === 'middle' ? '-50%' : a['text-anchor'] === 'end' ? '-100%' : '0';
+      const t = `translate(${f1(it.x)}px,${f1(it.y)}px) translate(${ax},-82%)`;
+      if (e.tf !== t) { e.style.transform = t; e.tf = t; }
+      seen.add(it.key);
+    }
+    for (const [key, e] of pool) if (!seen.has(key)) { e.remove(); pool.delete(key); }
+  }
+  function fitLabelLayer() {
+    const svg = $('#scene'), layer = $('#lbls');
+    if (layer && svg.clientWidth) layer.style.transform = `scale(${svg.clientWidth / VW})`;
+  }
+  const AROUND = [[6, -6, 'start'], [-6, -6, 'end'], [6, 13, 'start'], [-6, 13, 'end']];
+  const BESIDE = [[5, 4, 'start'], [-5, 4, 'end'], [0, -6, 'middle'], [0, 15, 'middle']];
+
   // ---------- 3D scene: orthographic view of two horizontal planes ----------
-  function renderScene() {
+  // The SVG keeps one skeleton; a frame only moves transforms and rewrites a few batched paths.
+  function buildSkeleton() {
+    const g = D.g;
     const svg = $('#scene');
-    if (!D) return;
+    svg.innerHTML = `<defs><clipPath id="board-clip"><rect id="clip-rect" x="0" y="0" width="1" height="1"/></clipPath></defs>
+      <polygon id="bot-slab" fill="#060B15" pointer-events="none"/>
+      <polygon id="bot-face" fill="#0F192C" stroke="#2A3C5E"/>
+      <g id="bot-map" clip-path="url(#board-clip)"><g id="bot-zoom"></g></g>
+      <g id="rdots" pointer-events="none"></g>
+      <g id="guides" pointer-events="none"></g>
+      <g id="threads" pointer-events="none"></g>
+      <polygon id="top-face" fill="#7F9CCB" fill-opacity="0.05" stroke="#3A4F78" stroke-opacity="0.8" pointer-events="none"/>
+      <g id="top-shift" pointer-events="none"><g id="top-extr" opacity="0.6">${g.cn.map((p) => `<path d="${p.d}" fill="#040812"/>`).join('')}</g></g>
+      <g id="top-map">${g.cn.map((p) => `<path d="${p.d}" data-p="${p.n}" stroke="#9FB2D2" stroke-opacity="0.4" stroke-width="0.6" vector-effect="non-scaling-stroke"/>`).join('')}<path d="${g.nh}" fill="#9FB2D2" fill-opacity="0.45" pointer-events="none"/></g>
+      <g id="cdots" pointer-events="none"></g>
+      <g id="hl" pointer-events="none"></g>`;
+    sk = {};
+    for (const id of ['clip-rect', 'bot-slab', 'bot-face', 'bot-map', 'bot-zoom', 'rdots', 'guides', 'threads', 'top-face', 'top-shift', 'top-extr', 'top-map', 'cdots', 'hl', 'lbls']) {
+      sk[id.replace(/-(\w)/g, (m, c) => c.toUpperCase())] = document.getElementById(id);
+    }
+    sk.prov = {};
+    for (const el of sk.topMap.querySelectorAll('[data-p]')) sk.prov[el.dataset.p] = el;
+    buildDistricts();
+  }
+  function buildDistricts() {
+    const pl = plane();
+    sk.botZoom.innerHTML = pl.shd.map((d) => `<path d="${d.d}" data-z="${shortZone(d.n)}" vector-effect="non-scaling-stroke"/>`).join('') +
+      `<path id="river" d="${pl.river}" fill="none" stroke="#1F5A93" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>`;
+    sk.river = document.getElementById('river');
+    sk.zone = {};
+    for (const el of sk.botZoom.querySelectorAll('[data-z]')) {
+      const z = el.dataset.z;
+      sk.zone[z] = el;
+      if (D.zoneCount[z]) { el.setAttribute('data-zone', z); el.style.cursor = 'pointer'; }
+    }
+  }
+  // fills and outlines that depend on the selection, the search and the hovered district / province
+  function styleStatic() {
+    const sel = state.sel;
+    const picked = sel && sel.t === 'z' ? sel.id : null;
+    for (const [z, el] of Object.entries(sk.zone)) {
+      const n = D.zoneCount[z] || 0, hov = !!hover && hover.t === 'zone' && hover.id === z;
+      el.setAttribute('fill', z === picked ? '#2C4673' : hov ? '#22365A' : n ? '#1A2A47' : '#111C30');
+      el.setAttribute('stroke', z === picked || hov ? '#EEF2F8' : '#2E4268');
+      el.setAttribute('stroke-width', z === picked ? 1.6 : hov ? 1.2 : 0.8);
+    }
+    if (picked && sk.zone[picked]) sk.botZoom.insertBefore(sk.zone[picked], sk.river);   // its outline on top
+    for (const [p, el] of Object.entries(sk.prov)) {
+      const has = !!(P[p] && D.count[p]);   // provinces without roads let clicks through to the map below
+      const hov = !!hover && hover.t === 'prov' && hover.id === p;
+      let fill = '#1C2A44', op = 0.75;
+      if (p === '上海') { fill = '#EEF2F8'; op = 0.95; }
+      else if (has) { fill = P[p][2]; op = D.filtered ? (isOn(p) ? 0.62 : 0.08) : 0.3; if (hov) op = Math.max(op, 0.5); }
+      el.setAttribute('fill', fill);
+      el.setAttribute('fill-opacity', op);
+      el.setAttribute('stroke', hov ? '#FFFFFF' : '#9FB2D2');
+      el.setAttribute('stroke-opacity', hov ? 1 : 0.4);
+      el.setAttribute('stroke-width', hov ? 1.4 : 0.6);
+      if (has) { el.setAttribute('data-prov', p); el.style.cursor = 'pointer'; } else el.setAttribute('pointer-events', 'none');
+    }
+  }
+
+  function renderScene() {
+    if (!D || !sk) return;
     const g = D.g;
     const az = state.az * DEG, el = state.el * DEG;
     const ca = Math.cos(az), sa = Math.sin(az), se = Math.sin(el), ce = Math.cos(el);
     const zt = LAYER_GAP / 2, zb = -LAYER_GAP / 2;
-    const lin = state.proj === 'lin', plane = lin ? g.lin : g.fish;
-    const TOP = { W: g.cw, H: g.ch }, BOT = { W: plane.w, H: plane.h };
+    const lin = state.proj === 'lin', pl = plane();
+    const TOP = { W: g.cw, H: g.ch }, BOT = { W: pl.w, H: pl.h };
     // plane point (u, v) at height z -> view coordinates
-    const raw = (L, u, v, z) => { const x = u - L.W / 2, y = v - L.H / 2; return [ca * x - sa * y, se * (sa * x + ca * y) - z * ce]; };
-    const corners = (L) => [[0, 0], [L.W, 0], [L.W, L.H], [0, L.H]];
+    const raw = (Lp, u, v, z) => { const x = u - Lp.W / 2, y = v - Lp.H / 2; return [ca * x - sa * y, se * (sa * x + ca * y) - z * ce]; };
+    const corners = (Lp) => [[0, 0], [Lp.W, 0], [Lp.W, Lp.H], [0, Lp.H]];
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const [L, z] of [[TOP, zt], [TOP, zt - SLAB], [BOT, zb], [BOT, zb - SLAB]]) {
-      for (const [u, v] of corners(L)) {
-        const [x, y] = raw(L, u, v, z);
+    for (const [Lp, z] of [[TOP, zt], [TOP, zt - SLAB], [BOT, zb], [BOT, zb - SLAB]]) {
+      for (const [u, v] of corners(Lp)) {
+        const [x, y] = raw(Lp, u, v, z);
         x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
       }
     }
     const sc = Math.min((VW - 140) / (x1 - x0), (VH - 130) / (y1 - y0));
     const ox = VW / 2 - sc * (x0 + x1) / 2, oy = VH / 2 + 12 - sc * (y0 + y1) / 2;
-    const pr = (L, u, v, z) => { const [x, y] = raw(L, u, v, z); return [ox + sc * x, oy + sc * y]; };
+    const pr = (Lp, u, v, z) => { const [x, y] = raw(Lp, u, v, z); return [ox + sc * x, oy + sc * y]; };
     // the same projection as an SVG affine matrix, so map paths can stay in plane coordinates
-    const mat = (L, z) => 'matrix(' + [sc * ca, sc * se * sa, -sc * sa, sc * se * ca,
-      ox + sc * (-ca * L.W / 2 + sa * L.H / 2), oy + sc * (se * (-sa * L.W / 2 - ca * L.H / 2) - z * ce)].map((n) => n.toFixed(4)).join(' ') + ')';
-    const face = (L, z) => corners(L).map(([u, v]) => pr(L, u, v, z));
+    const matArr = (Lp, z) => [sc * ca, sc * se * sa, -sc * sa, sc * se * ca,
+      ox + sc * (-ca * Lp.W / 2 + sa * Lp.H / 2), oy + sc * (se * (-sa * Lp.W / 2 - ca * Lp.H / 2) - z * ce)];
+    const mat = (Lp, z) => 'matrix(' + matArr(Lp, z).map((n) => n.toFixed(4)).join(' ') + ')';
+    const face = (Lp, z) => corners(Lp).map(([u, v]) => pr(Lp, u, v, z));
     const botFace = face(BOT, zb), topFace = face(TOP, zt);
-    const labelAt = (f) => { const c = f.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1])[0]; return [f1(Math.max(16, c[0])), f1(c[1] - 30), f1(c[1] - 12)]; };
-    const sel = state.sel;
-    const out = [];
-    const W = BOT.W, H = BOT.H, k = zoom.k;
+    const sel = state.sel, k = zoom.k, W = BOT.W, H = BOT.H;
     // map plane -> board, after zooming; things outside the board are clipped or skipped
     const zu = (u) => (u - zoom.cx) * k + W / 2, zv = (v) => (v - zoom.cy) * k + H / 2;
     const inBoard = (u, v) => u >= -1 && u <= W + 1 && v >= -1 && v <= H + 1;
-    botMatrix = [sc * ca, sc * se * sa, -sc * sa, sc * se * ca,
-      ox + sc * (-ca * W / 2 + sa * H / 2), oy + sc * (se * (-sa * W / 2 - ca * H / 2) - zb * ce)];
+    botMatrix = matArr(BOT, zb);
 
-    // bottom board: Shanghai
-    out.push(`<defs><clipPath id="board-clip"><rect x="0" y="0" width="${W}" height="${H}"/></clipPath></defs>`);
-    out.push(`<polygon points="${pts(hull(botFace.concat(face(BOT, zb - SLAB))))}" fill="#060B15"/>`);
-    out.push(`<polygon points="${pts(botFace)}" fill="#0F192C" stroke="#2A3C5E"/>`);
-    out.push(`<g transform="${mat(BOT, zb)}" clip-path="url(#board-clip)"><g transform="translate(${f1(W / 2)} ${f1(H / 2)}) scale(${k.toFixed(4)}) translate(${(-zoom.cx).toFixed(2)} ${(-zoom.cy).toFixed(2)})">`);
-    const pickedZone = sel && sel.t === 'z' ? sel.id : null;
-    const districts = plane.shd.slice().sort((a, b) => (shortZone(a.n) === pickedZone) - (shortZone(b.n) === pickedZone));
-    for (const d of districts) {
-      const z = shortZone(d.n), n = D.zoneCount[z] || 0, picked = z === pickedZone;
-      out.push(`<path d="${d.d}" fill="${picked ? '#2C4673' : n ? '#1A2A47' : '#111C30'}" stroke="${picked ? '#EEF2F8' : '#2E4268'}" stroke-width="${picked ? 1.6 : 0.8}" vector-effect="non-scaling-stroke"${n ? ` data-zone="${z}" style="cursor:pointer"` : ''}><title>${esc(d.n + (n ? `：${n} 条，点击查看` : ''))}</title></path>`);
-    }
-    out.push(`<path d="${plane.river}" fill="none" stroke="#1F5A93" stroke-width="${(5 / Math.sqrt(k)).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/></g></g>`);
-    for (const d of plane.shd) {
-      const z = shortZone(d.n), lu = zu(d.lx), lv = zv(d.ly);
-      if (!inBoard(lu, lv)) continue;
-      const [x, y] = pr(BOT, lu, lv, zb);
-      const fill = z === pickedZone ? '#FFFFFF' : D.zoneCount[z] ? '#8E9CB4' : '#56647C';
-      out.push(`<text class="lbl" x="${f1(x)}" y="${f1(y + 5)}" text-anchor="middle" fill="${fill}" style="font-size:12px;font-weight:700;letter-spacing:.12em">${esc(z)}</text>`);
-    }
+    // planes
+    sk.clipRect.setAttribute('width', W); sk.clipRect.setAttribute('height', H);
+    sk.botSlab.setAttribute('points', pts(hull(botFace.concat(face(BOT, zb - SLAB)))));
+    sk.botFace.setAttribute('points', pts(botFace));
+    sk.botMap.setAttribute('transform', mat(BOT, zb));
+    sk.botZoom.setAttribute('transform', `translate(${f1(W / 2)} ${f1(H / 2)}) scale(${k.toFixed(4)}) translate(${(-zoom.cx).toFixed(2)} ${(-zoom.cy).toFixed(2)})`);
+    sk.river.setAttribute('stroke-width', (5 / Math.sqrt(k)).toFixed(2));
+    sk.topFace.setAttribute('points', pts(topFace));
+    sk.topShift.setAttribute('transform', `translate(0 ${f1(sc * 9 * ce)})`);
+    sk.topExtr.setAttribute('transform', mat(TOP, zt));
+    sk.topMap.setAttribute('transform', mat(TOP, zt));
 
-    // threads + dots
-    const threads = [], rdots = [], cities = new Map(), botL = [];
-    const cityLabels = !!sel && (sel.t === 'p' || sel.t === 'z');
-    // road names on the lower map: for a selected province, or once zoomed in far enough to read them
-    const visible = D.roads.filter((r) => inBoard(zu(lin ? r.lu : r.su), zv(lin ? r.lv : r.sv)));
-    const labelled = visible.filter((r) => !sel || roadOn(r));
-    const roadLabels = (!!sel && sel.t === 'p') || (k >= 2 && labelled.length <= 120);
-    const visibleSet = new Set(visible);
-    const dotR = k >= 3 ? 0.6 : 0;
+    // project every city and every road on the board (kept for hit tests, the highlight and the card)
+    for (const c of D.cities.values()) { const [x, y] = pr(TOP, c.cu, c.cv, zt); c.x = x; c.y = y; }
     for (const r of D.roads) {
-      const color = P[r.prov][2], on = roadOn(r), hi = !!sel && on;
-      const [ax, ay] = pr(TOP, r.cu, r.cv, zt);
-      // one dot per city; it is lit if any of its roads is
-      const key = r.cu + ',' + r.cv;
-      const c = cities.get(key) || { x: ax, y: ay, color, isP: r.isP, name: r.base, prov: r.prov, on: false, hi: false };
-      c.on = c.on || on; c.hi = c.hi || hi;
-      cities.set(key, c);
-      if (!visibleSet.has(r)) continue;   // zoomed away from this road
-      const [bx, by] = pr(BOT, zu(lin ? r.lu : r.su), zv(lin ? r.lv : r.sv), zb);
-      threads.push([hi, `<line x1="${f1(ax)}" y1="${f1(ay)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="${color}" stroke-opacity="${sel ? (on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}" stroke-linecap="round" pointer-events="none"/>`]);
-      rdots.push([hi, `<circle cx="${f1(bx)}" cy="${f1(by)}" r="${(hi ? 3.4 : 2.3) + dotR}" fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${on ? 1 : 0.2}" data-zone="${r.zone}" style="cursor:pointer"><title>${esc(r.name + ' → ' + (r.isP ? r.prov : r.label) + '（' + zoneFull(r.zone) + '）')}</title></circle>`]);
-      if (roadLabels && on) botL.push(`<text class="lbl lbl-sel" x="${f1(bx + 5)}" y="${f1(by + 4)}" fill="#F4F6FA" style="font-size:10px;font-weight:500">${esc(r.name)}</text>`);
+      const [u, v] = planeXY(r), bu = zu(u), bv = zv(v);
+      r.vis = inBoard(bu, bv);
+      if (r.vis) { const [x, y] = pr(BOT, bu, bv, zb); r.bx = x; r.by = y; }
     }
-    const ordered = (list) => list.filter((x) => !x[0]).concat(list.filter((x) => x[0])).map((x) => x[1]).join('');
-    const cdots = [], topL = [];
-    for (const c of cities.values()) {
-      cdots.push([c.hi, `<circle cx="${f1(c.x)}" cy="${f1(c.y)}" r="${c.hi ? 3.6 : 2.4}" fill="${c.isP ? 'none' : c.color}" stroke="${c.isP ? c.color : INK}" stroke-width="${c.isP ? 1.5 : 0.7}" opacity="${c.on ? 1 : 0.2}" data-prov="${c.prov}" style="cursor:pointer"><title>${esc(c.isP ? c.prov : c.name + '（' + c.prov + '）')}</title></circle>`]);
-      if (cityLabels && c.hi && !c.isP) topL.push(`<text class="lbl lbl-sel" x="${f1(c.x + 6)}" y="${f1(c.y - 6)}" fill="#F4F6FA" style="font-size:11px;font-weight:700">${esc(c.name)}</text>`);
+
+    // threads and dots, batched into one path per style; dimmed first, lit last
+    const filtered = D.filtered, dotR = k >= 3 ? 0.6 : 0;
+    const threadG = new Map(), dotG = new Map();
+    const add = (map, key, attrs, seg) => { let e = map.get(key); if (!e) map.set(key, e = { attrs, d: [] }); e.d.push(seg); };
+    for (const r of D.roads) {
+      if (!r.vis) continue;
+      const color = P[r.prov][2], hi = filtered && r.on, c = D.cities.get(r.city);
+      const z = !filtered ? 1 : r.on ? 2 : 0;
+      add(threadG, z + color, [z, `stroke="${color}" stroke-opacity="${filtered ? (r.on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}"`],
+        `M${f1(c.x)} ${f1(c.y)}L${f1(r.bx)} ${f1(r.by)}`);
+      const rad = (hi ? 3.4 : 2.3) + dotR;
+      add(dotG, z + color + r.isP, [z, `fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${r.on ? 1 : 0.2}"`],
+        circ(r.bx, r.by, rad));
     }
-    out.push(ordered(rdots));
+    const cityG = new Map();
+    for (const c of D.cities.values()) {
+      const hi = filtered && c.on, z = !filtered ? 1 : c.on ? 2 : 0;
+      add(cityG, z + c.color + c.isP, [z, `fill="${c.isP ? 'none' : c.color}" stroke="${c.isP ? c.color : INK}" stroke-width="${c.isP ? 1.5 : 0.7}" opacity="${c.on ? 1 : 0.2}"`],
+        circ(c.x, c.y, hi ? 3.6 : 2.4));
+    }
+    const paths = (map, extra) => Array.from(map.values()).sort((a, b) => a.attrs[0] - b.attrs[0])
+      .map((e) => `<path d="${e.d.join('')}" ${e.attrs[1]}${extra}/>`).join('');
+    sk.rdots.innerHTML = paths(dotG, '');
+    sk.threads.innerHTML = paths(threadG, ' fill="none" stroke-linecap="round"');
+    sk.cdots.innerHTML = paths(cityG, '');
     const sh = g.cn.find((p) => p.n === '上海');
     if (sh) {
       const [sx, sy] = pr(TOP, sh.lx, sh.ly, zt);
-      for (const [bx, by] of botFace) out.push(`<line x1="${f1(sx)}" y1="${f1(sy)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="#EEF2F8" stroke-opacity="0.18" stroke-dasharray="3 6" pointer-events="none"/>`);
+      sk.guides.innerHTML = `<path d="${botFace.map(([bx, by]) => `M${f1(sx)} ${f1(sy)}L${f1(bx)} ${f1(by)}`).join('')}" stroke="#EEF2F8" stroke-opacity="0.18" stroke-dasharray="3 6" fill="none"/>`;
     }
-    out.push(ordered(threads));
 
-    // top layer: China, a glassy plate with an extruded map
-    // only the provinces themselves take clicks, so the lower map stays clickable where the layers overlap
-    out.push(`<polygon points="${pts(topFace)}" fill="#7F9CCB" fill-opacity="0.05" stroke="#3A4F78" stroke-opacity="0.8" pointer-events="none"/>`);
-    out.push(`<g transform="translate(0 ${f1(sc * 9 * ce)})" pointer-events="none"><g transform="${mat(TOP, zt)}" opacity="0.6">`);
-    for (const p of g.cn) out.push(`<path d="${p.d}" fill="#040812"/>`);
-    out.push(`</g></g><g transform="${mat(TOP, zt)}">`);
-    for (const p of g.cn) {
-      const has = !!(P[p.n] && D.count[p.n]);  // provinces without roads let clicks through to the map below
-      let fill = '#1C2A44', op = 0.75;
-      if (p.n === '上海') { fill = '#EEF2F8'; op = 0.95; }
-      else if (has) { fill = P[p.n][2]; op = sel ? (isOn(p.n) ? 0.62 : 0.08) : 0.3; }
-      out.push(`<path d="${p.d}" fill="${fill}" fill-opacity="${op}" stroke="#9FB2D2" stroke-opacity="0.4" stroke-width="0.6" vector-effect="non-scaling-stroke"${has ? ` data-prov="${p.n}" style="cursor:pointer"` : ' pointer-events="none"'}><title>${esc(p.n + (has ? `：${D.count[p.n]} 条` : ''))}</title></path>`);
+    // labels
+    const cands = [];
+    const en = isEn();
+    const focusRoads = new Set(roadsOf(state.focus)), focusCity = state.focus && (state.focus.t === 'road' ? D.roads[state.focus.i].city : state.focus.key);
+    for (const r of focusRoads) {
+      if (r.vis) cands.push({ key: 'fr' + r.i, x: r.bx, y: r.by, text: roadName(r), size: 12, weight: 700, fill: '#FFFFFF', pri: 100, alts: BESIDE });
     }
-    out.push(`<path d="${g.nh}" fill="#9FB2D2" fill-opacity="0.45" pointer-events="none"/></g>`);
+    const fc = state.focus && D.cities.get(focusCity);
+    if (fc && !fc.isP) {   // a province is already labelled on the map
+      const c = fc;
+      cands.push({ key: 'fc' + c.key, x: c.x, y: c.y, text: cityName(c), size: 12, weight: 700, fill: '#FFFFFF', pri: 100, alts: AROUND });
+    }
+    const picked = sel && sel.t === 'z' ? sel.id : null;
+    for (const d of pl.shd) {
+      const z = shortZone(d.n), lu = zu(d.lx), lv = zv(d.ly);
+      if (!inBoard(lu, lv)) continue;
+      const [x, y] = pr(BOT, lu, lv, zb);
+      cands.push({ key: 'z' + z, x, y, text: zoneName(z), size: 12, weight: 700, ls: en ? 0.04 : 0.12, pri: 60, alts: [[0, 5, 'middle']],
+        fill: z === picked ? '#FFFFFF' : D.zoneCount[z] ? '#8E9CB4' : '#56647C' });
+    }
     for (const p of g.cn) {
       if (!D.count[p.n] && p.n !== '上海') continue;
       const [x, y] = pr(TOP, p.lx, p.ly, zt);
       const on = p.n === '上海' || isOn(p.n);
-      out.push(`<text class="lbl" x="${f1(x)}" y="${f1(y + 14)}" text-anchor="middle" fill="${p.n === '上海' ? '#FFFFFF' : '#DCE3EE'}" opacity="${on ? 0.9 : 0.25}" style="font-size:11px;font-weight:700">${esc(p.n)}</text>`);
+      cands.push({ key: 'p' + p.n, x, y, text: provName(p.n), size: en ? 10 : 11, weight: 700, pri: on ? 50 : 45, alts: [[0, 14, 'middle'], [0, -8, 'middle']],
+        fill: p.n === '上海' ? '#FFFFFF' : '#DCE3EE', op: on ? 0.9 : 0.25 });
     }
-    out.push(ordered(cdots));
-    out.push(topL.join(''), botL.join(''));
-
+    // city and road names: for a selection or a short search result, or once zoomed in far enough to read them
+    const litCities = filtered ? Array.from(D.cities.values()).filter((c) => c.on) : [];
+    const cityLabels = (!!sel && (sel.t === 'p' || sel.t === 'z')) || (!!state.q.trim() && litCities.length <= 80);
+    if (cityLabels) {
+      for (const c of litCities) if (!c.isP && c.key !== focusCity) cands.push({ key: 'c' + c.key, x: c.x, y: c.y, text: cityName(c), size: 11, weight: 700, fill: '#F4F6FA', cls: 'lbl-sel', pri: 30 + Math.min(c.roads.length, 9) / 10, alts: AROUND });
+    }
+    const labelled = D.roads.filter((r) => r.vis && (!filtered || r.on));
+    const roadLabels = (!!sel && sel.t === 'p') || (k >= 2 && labelled.length <= 250) || (!!state.q.trim() && labelled.length <= 80);
+    if (roadLabels) {
+      for (const r of labelled) if (!focusRoads.has(r)) cands.push({ key: 'r' + r.i, x: r.bx, y: r.by, text: roadName(r), size: 10, weight: 500, fill: '#F4F6FA', cls: 'lbl-sel', pri: 20, alts: BESIDE });
+    }
+    // captions of the two layers, then everything into the label layer
+    const labelAt = (f) => { const c = f.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1])[0]; return [f1(Math.max(16, c[0])), f1(c[1] - 30), f1(c[1] - 12)]; };
     const [tx, ty, ty2] = labelAt(topFace), [bx, by, by2] = labelAt(botFace);
-    out.push(`<text x="${tx}" y="${ty}" fill="#F4F6FA" style="font-size:16px;font-weight:700;letter-spacing:.08em;pointer-events:none">上层 · 中国</text>`,
-      `<text x="${tx}" y="${ty2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 被借用名字的城市、县</text>`,
-      `<text x="${bx}" y="${by}" fill="#F4F6FA" style="font-size:16px;font-weight:700;letter-spacing:.08em;pointer-events:none">下层 · 上海</text>`,
-      `<text x="${bx}" y="${by2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 道路实际位置，${lin ? '真实比例' : '中心城区放大'} · 可点击各区、滚轮缩放</text>`);
-    svg.innerHTML = out.join('');
+    const head = { class: 'cap', fill: '#F4F6FA', style: 'font-size:16px;font-weight:700;letter-spacing:.08em' }, sub = { class: 'cap', fill: '#93A1B8', style: 'font-size:12px' };
+    syncLabels(sk.lbls, placeLabels(cands).concat([{ key: 't', x: tx, y: ty, text: T('capTop'), attrs: head }, { key: 'ts', x: tx, y: ty2, text: T('capTopSub'), attrs: sub },
+      { key: 'b', x: bx, y: by, text: T('capBot'), attrs: head }, { key: 'bs', x: bx, y: by2, text: T('capBotSub', lin), attrs: sub }]));
+
+    renderHighlight();
+    renderCard();
     $('#az').value = state.az;
     $('#el').value = state.el;
     for (const b of $$('[data-act="proj"]')) b.setAttribute('aria-pressed', String(b.dataset.id === state.proj));
-    $('#zoom-level').textContent = k < 1.05 ? '全上海' : k.toFixed(1) + '×';
+    $('#zoom-level').textContent = k < 1.05 ? T('whole') : k.toFixed(1) + '×';
+  }
+
+  let sceneQueued = false;
+  function queueScene() {
+    if (sceneQueued) return;
+    sceneQueued = true;
+    requestAnimationFrame(() => { sceneQueued = false; renderScene(); });
+  }
+
+  // ---------- focus & hover: one road or city drawn on top, with a card ----------
+  function renderHighlight() {
+    const out = [];
+    const road = (r, labels) => {
+      const c = D.cities.get(r.city), color = P[r.prov][2];
+      if (r.vis) {
+        const d = `M${f1(c.x)} ${f1(c.y)}L${f1(r.bx)} ${f1(r.by)}`;
+        out.push(`<path d="${d}" stroke="${INK}" stroke-opacity="0.7" stroke-width="4.5" stroke-linecap="round"/><path d="${d}" stroke="${color}" stroke-width="2.2" stroke-linecap="round"/>`,
+          `<path d="${circ(r.bx, r.by, 5)}" fill="${r.isP ? INK : color}" stroke="#FFFFFF" stroke-width="1.6"/>`);
+        if (labels) out.push(`<text class="lbl" x="${f1(r.bx + 8)}" y="${f1(r.by + 4)}" fill="#FFFFFF" style="font-size:12px;font-weight:700">${esc(roadName(r))}</text>`);
+      }
+    };
+    const city = (c, labels) => {
+      out.push(`<path d="${circ(c.x, c.y, 5.2)}" fill="${c.isP ? INK : c.color}" stroke="#FFFFFF" stroke-width="1.6"/>`);
+      if (labels) out.push(`<text class="lbl" x="${f1(c.x + 8)}" y="${f1(c.y - 7)}" fill="#FFFFFF" style="font-size:12px;font-weight:700">${esc(cityName(c))}</text>`);
+    };
+    for (const [t, isHover] of [[state.focus, false], [hover, true]]) {
+      if (!t || (t.t !== 'road' && t.t !== 'city') || (isHover && same(t, state.focus))) continue;
+      const rs = roadsOf(t);
+      rs.forEach((r) => road(r, isHover && rs.length <= 12));   // the focus already has labels from the main pass
+      city(D.cities.get(t.t === 'road' ? D.roads[t.i].city : t.key), isHover);
+    }
+    sk.hl.innerHTML = out.join('');
+  }
+
+  function cardHTML(t, pinned) {
+    const close = pinned ? `<button type="button" class="mc-close" data-act="unfocus" aria-label="${esc(T('close'))}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>` : '';
+    if (t.t === 'road') {
+      const r = D.roads[t.i], color = P[r.prov][2];
+      return `${close}<div class="mc-head"><span class="mc-dot${r.isP ? ' hollow' : ''}" style="--c:${color}"></span><b>${esc(roadName(r))}</b>${isEn() ? `<span class="mc-zh" lang="zh">${esc(r.name)}</span>` : ''}</div>
+        <div class="mc-line">→ ${esc(placeFull(r))}</div>
+        <div class="mc-sub">${esc(zoneFull(r.zone))}${r.vis ? '' : ' ' + esc(T('offView'))}</div>
+        ${r.basis ? `<div class="mc-inf"><span class="inf">${T('inferred')}</span>${esc(basisText(r))}</div>` : ''}
+        ${pinned ? `<a class="mc-report" href="${esc(issueURL(r))}" target="_blank" rel="noopener">${esc(T('report'))}</a>` : ''}`;
+    }
+    if (t.t === 'city') {
+      const c = D.cities.get(t.key), rs = c.roads.map((i) => D.roads[i]);
+      const list = rs.slice(0, 10).map((r) => `<li><b>${esc(roadName(r))}</b><span>${esc(zoneName(r.zone))}</span>${infTag(r)}</li>`).join('');
+      return `${close}<div class="mc-head"><span class="mc-dot${c.isP ? ' hollow' : ''}" style="--c:${c.color}"></span><b>${esc(isEn() ? c.en : c.name)}</b><span class="mc-zh">${esc(c.isP ? '' : provName(c.prov))}</span></div>
+        <div class="mc-sub">${esc(T('cityRoads', rs.length))}</div><ul class="mc-list">${list}</ul>${rs.length > 10 ? `<div class="mc-sub">${esc(T('more', rs.length))}</div>` : ''}`;
+    }
+    if (t.t === 'zone') {
+      const provs = {};
+      for (const r of D.roads) if (r.zone === t.id) provs[r.prov] = (provs[r.prov] || 0) + 1;
+      const keys = Object.keys(provs).sort((a, b) => provs[b] - provs[a]);
+      return `<div class="mc-head"><b>${esc(zoneFull(t.id))}</b></div><div class="mc-sub">${esc(T('zoneCard', D.zoneCount[t.id], keys.length))}</div>
+        <div class="mc-line">${esc(keys.slice(0, 5).map((p) => provName(p) + ' ' + provs[p]).join(T('listSep')))}</div><div class="mc-hint">${esc(T('clickToSee'))}</div>`;
+    }
+    return `<div class="mc-head"><span class="mc-dot" style="--c:${P[t.id][2]}"></span><b>${esc(provName(t.id))}</b></div><div class="mc-sub">${esc(T('provCard', D.count[t.id]))}</div><div class="mc-hint">${esc(T('clickToSee'))}</div>`;
+  }
+  // the hover card wins while the mouse is over something; otherwise the pinned focus card stays
+  function renderCard() {
+    const card = $('#card');
+    const t = hover && !same(hover, state.focus) ? hover : state.focus;
+    if (!t || !D) { card.hidden = true; return; }
+    const pinned = same(t, state.focus);
+    card.innerHTML = cardHTML(t, pinned);
+    card.classList.toggle('pinned', pinned);
+    card.hidden = false;
+    // anchor: the dot (road on the board if visible, else its city), or the mouse for districts and provinces
+    const svg = $('#scene'), scene = svg.parentElement.getBoundingClientRect(), ctm = svg.getScreenCTM();
+    let cx, cy;
+    if ((t.t === 'zone' || t.t === 'prov') && lastPointer) { cx = lastPointer.x; cy = lastPointer.y; }
+    else if (ctm) {
+      const r = t.t === 'road' ? D.roads[t.i] : null;
+      const c = D.cities.get(r ? r.city : t.key);
+      const [x, y] = r && r.vis ? [r.bx, r.by] : [c.x, c.y];
+      const p = svg.createSVGPoint(); p.x = x; p.y = y;
+      const q = p.matrixTransform(ctm);
+      cx = q.x; cy = q.y;
+    } else { card.hidden = true; return; }
+    const svgBox = svg.getBoundingClientRect();
+    const w = card.offsetWidth, h = card.offsetHeight;
+    let left = cx - scene.left + 16, top = cy - scene.top + 16;
+    if (left + w > svgBox.right - scene.left - 8) left = cx - scene.left - w - 16;
+    if (top + h > svgBox.bottom - scene.top - 8) top = cy - scene.top - h - 16;
+    card.style.left = Math.max(8, left) + 'px';
+    card.style.top = Math.max(8, top) + 'px';
+  }
+
+  // nearest dot within reach of a client point: a road on the board or a city above
+  function pick(clientX, clientY, touch) {
+    const svg = $('#scene'), ctm = svg.getScreenCTM();
+    if (!ctm || !D) return null;
+    const p = svg.createSVGPoint(); p.x = clientX; p.y = clientY;
+    const q = p.matrixTransform(ctm.inverse());
+    const reach = (touch ? 16 : 9) / Math.abs(ctm.a || 1);
+    let best = null, bd = reach * reach;
+    for (const r of D.roads) {
+      if (!r.vis) continue;
+      const d = (r.bx - q.x) ** 2 + (r.by - q.y) ** 2;
+      if (d < bd) { bd = d; best = { t: 'road', i: r.i }; }
+    }
+    for (const c of D.cities.values()) {
+      const d = (c.x - q.x) ** 2 + (c.y - q.y) ** 2;
+      if (d < bd) { bd = d; best = { t: 'city', key: c.key }; }
+    }
+    return best;
+  }
+  function setHover(h) {
+    if (same(h, hover) || (!h && !hover)) { if (h && (h.t === 'zone' || h.t === 'prov')) renderCard(); return; }
+    const restyle = (hover && (hover.t === 'zone' || hover.t === 'prov')) || (h && (h.t === 'zone' || h.t === 'prov'));
+    hover = h;
+    if (restyle) styleStatic();
+    renderHighlight();
+    renderCard();
+    $('#scene').classList.toggle('pointing', !!h);
+  }
+  function setFocus(f, opts = {}) {
+    state.focus = f;
+    hover = null;
+    if (f && opts.zoom) zoomToFocus();
+    renderScene();
+    $('#scene').classList.remove('pointing');
+    if (f && opts.scroll) $('.scene').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'center' });
+    scheduleURL();
+  }
+  // bring the focused road (or all roads of the focused city) into the zoomed view
+  function zoomToFocus() {
+    const { w, h } = plane(), ps = roadsOf(state.focus).map(planeXY);
+    if (!ps.length) return;
+    const xs = ps.map((p) => p[0]), ys = ps.map((p) => p[1]);
+    const box = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    const bw = Math.max(box[2] - box[0], w / 14), bh = Math.max(box[3] - box[1], h / 14);
+    const fit = Math.min(w / (bw * 1.25), h / (bh * 1.25));
+    const k = ps.length === 1 ? Math.max(zoom.k, state.proj === 'lin' ? 6 : 3) : fit;
+    zoom = { k, cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
+    clampZoom();
+    zoomTouched = true;
   }
 
   // ---------- zoom of the lower map ----------
-  const plane = () => (state.proj === 'lin' ? D.g.lin : D.g.fish);
   function clampZoom() {
     const { w, h } = plane();
     zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k));
@@ -236,13 +542,14 @@
   // frame the selected district (its outline) or the roads of the selected province / region
   function fitZoom() {
     const { w, h } = plane();
-    const sel = state.sel, lin = state.proj === 'lin';
+    const sel = state.sel;
     let box = null;
     if (sel && sel.t === 'z') box = D.zoneBox[state.proj][sel.id];
     else if (sel) {
-      const ps = D.roads.filter(roadOn).map((r) => (lin ? [r.lu, r.lv] : [r.su, r.sv]));
+      const ps = D.roads.filter(selOk).map(planeXY);
       if (ps.length) box = [Math.min(...ps.map((p) => p[0])), Math.min(...ps.map((p) => p[1])), Math.max(...ps.map((p) => p[0])), Math.max(...ps.map((p) => p[1]))];
     }
+    zoomTouched = false;
     if (!box) { zoom = { k: 1, cx: w / 2, cy: h / 2 }; return; }
     const bw = Math.max(box[2] - box[0], w / 14), bh = Math.max(box[3] - box[1], h / 14);
     zoom = { k: Math.min(w / (bw * 1.2), h / (bh * 1.2)), cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
@@ -262,21 +569,20 @@
     return { u: (d * x - c * y) / det, v: (-b * x + a * y) / det };
   }
   const onBoard = (bp) => { const { w, h } = plane(); return !!bp && bp.u >= 0 && bp.u <= w && bp.v >= 0 && bp.v <= h; };
-  function zoomAt(u, v, factor) {
+  const mapPointAt = (bp) => { const { w, h } = plane(); return { mx: (bp.u - w / 2) / zoom.k + zoom.cx, my: (bp.v - h / 2) / zoom.k + zoom.cy }; };
+  function keepUnder(m, bp) {   // move the view so map point m sits under board point bp
     const { w, h } = plane();
-    const mx = (u - w / 2) / zoom.k + zoom.cx, my = (v - h / 2) / zoom.k + zoom.cy;   // map point under the cursor stays put
-    zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k * factor));
-    zoom.cx = mx - (u - w / 2) / zoom.k;
-    zoom.cy = my - (v - h / 2) / zoom.k;
+    zoom.cx = m.mx - (bp.u - w / 2) / zoom.k;
+    zoom.cy = m.my - (bp.v - h / 2) / zoom.k;
     clampZoom();
-    queueScene();
   }
-
-  let sceneQueued = false;
-  function queueScene() {
-    if (sceneQueued) return;
-    sceneQueued = true;
-    requestAnimationFrame(() => { sceneQueued = false; renderScene(); });
+  function zoomAt(u, v, factor) {
+    const m = mapPointAt({ u, v });   // map point under the cursor stays put
+    zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k * factor));
+    keepUnder(m, { u, v });
+    zoomTouched = true;
+    queueScene();
+    scheduleURL();
   }
 
   // ---------- legend ----------
@@ -288,12 +594,12 @@
       const pills = provs.filter((p) => D.count[p]).map((p) => {
         const pOn = !!sel && sel.t === 'p' && sel.id === p;
         return `<button type="button" class="pill${isOn(p) ? '' : ' dim'}" data-act="prov" data-id="${p}" aria-pressed="${pOn}" style="border-color:${pOn ? P[p][2] : '#24324D'}">
-          <span class="badge" style="background:${P[p][2]}">${P[p][0]}</span><span>${p}</span><span class="n">${D.count[p]}</span></button>`;
+          <span class="badge" style="background:${P[p][2]}">${provAbbr(p)}</span><span>${esc(provName(p))}</span><span class="n">${D.count[p]}</span></button>`;
       }).join('');
       return `<div class="region">
         <button type="button" class="region-btn" data-act="region" data-id="${rid}" aria-pressed="${rOn}" style="border-color:${rOn ? rc : 'transparent'}">
           <span class="dots">${provs.map((p) => `<i style="background:${P[p][2]}"></i>`).join('')}</span>
-          <span class="name">${rid}</span><span class="n">${total} 条</span></button>
+          <span class="name">${esc(regionName(rid))}</span><span class="n">${esc(T('nRoads', total))}</span></button>
         <div class="pills">${pills}</div></div>`;
     }).join('');
   }
@@ -303,50 +609,49 @@
     const sel = state.sel;
     $('#zones').innerHTML = ZORDER.filter((z) => D.zoneCount[z]).map((z) => {
       const on = !!sel && sel.t === 'z' && sel.id === z;
-      return `<button type="button" class="zone-btn" data-act="zone" data-id="${z}" aria-pressed="${on}">${z}<span class="n">${D.zoneCount[z]}</span></button>`;
+      return `<button type="button" class="zone-btn" data-act="zone" data-id="${z}" aria-pressed="${on}">${esc(zoneName(z))}<span class="n">${D.zoneCount[z]}</span></button>`;
     }).join('');
   }
 
   // ---------- selection detail ----------
   function renderSel() {
     const sel = state.sel;
-    if (!sel) {
-      $('#sel').innerHTML = '<p class="sel-hint">点选省份、地区或上海的区（也可以直接点地图），对应的连线会被点亮，并在此列出全部道路。</p>';
-      return;
-    }
+    if (!sel) { $('#sel').innerHTML = `<p class="sel-hint">${esc(T('selHint'))}</p>`; return; }
     const isP = sel.t === 'p', isZ = sel.t === 'z';
     const reg = REGIONS.find((x) => x[0] === sel.id);
     const color = isP ? P[sel.id][2] : isZ ? '#EEF2F8' : reg[2];
-    const list = D.roads.filter(roadOn).sort(isZ ? byProv : byZone);
+    const list = D.roads.filter(selOk).sort(isZ ? byProv : byZone);
     const tally = {};
     list.forEach((r) => { const k = isZ ? r.prov : r.zone; tally[k] = (tally[k] || 0) + 1; });
     const keys = Object.keys(tally).sort((a, b) => tally[b] - tally[a]);
-    const parts = keys.slice(0, 10).map((k) => k + ' ' + tally[k]).join(' · ') + (keys.length > 10 ? ' …' : '');
-    const summary = isZ ? `共 ${list.length} 条，来自 ${keys.length} 个省级行政区：${parts}` : `共 ${list.length} 条，分布于 ${parts}`;
-    const title = isP ? sel.id : isZ ? zoneFull(sel.id) : (sel.id === '港澳台' ? '港澳台' : sel.id + '地区');
-    const badge = isP ? P[sel.id][0] : sel.id;
-    const kicker = isP ? P[sel.id][1] + ' · 省级行政区' : isZ ? '上海 · 区' : '地区';
+    const nm = isZ ? provName : zoneName;
+    const parts = keys.slice(0, 10).map((k) => nm(k) + ' ' + tally[k]).join(T('listSep')) + (keys.length > 10 ? ' …' : '');
+    const summary = isZ ? T('sumZone', list.length, keys.length, parts) : T('sumOther', list.length, parts);
+    const title = isP ? provName(sel.id) : isZ ? zoneFull(sel.id) : T('regionTitle', sel.id);
+    const badge = isP ? provAbbr(sel.id) : isZ ? zoneName(sel.id) : isEn() ? window.I18N.en.regionShort[sel.id] : sel.id;
+    const kicker = isP ? T('kickerP', regionName(P[sel.id][1])) : isZ ? T('kickerZ') : T('kickerR');
+    const bsize = isP ? (isEn() ? 16 : 22) : isEn() ? (badge.length > 6 ? 9 : badge.length > 3 ? 11 : 15) : badge.length > 2 ? 13 : 16;
     $('#sel').innerHTML = `<div class="sel" style="border-color:${color}">
       <div class="sel-head">
-        <span class="sel-badge" style="background:${color};font-size:${isP ? 22 : (badge.length > 2 ? 13 : 16)}px">${badge}</span>
-        <div class="sel-title"><small>${kicker}</small><b>${title}</b></div>
-        <span class="sel-summary">${summary}</span>
-        <button type="button" class="close-btn" data-act="clear" aria-label="清除筛选">
+        <span class="sel-badge" style="background:${color};font-size:${bsize}px">${esc(badge)}</span>
+        <div class="sel-title"><small>${esc(kicker)}</small><b>${esc(title)}</b></div>
+        <span class="sel-summary">${esc(summary)}</span>
+        <button type="button" class="close-btn" data-act="clear" aria-label="${esc(T('clear'))}">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>
       </div>
       <div class="selgrid">${list.map((r) => {
-        const place = r.isP ? r.prov + '（省名）' : r.label;
-        return `<div class="sel-row" title="${esc(place)}"><span class="dot" style="background:${P[r.prov][2]}"></span><b>${esc(r.name)}</b><span class="arrow">→</span><span class="place">${esc(place)}</span><span class="zone">${isZ ? r.prov : r.zone}</span></div>`;
+        const place = isEn() ? r.en[1] : r.isP ? T('provNamed', r.prov) : r.label;
+        return `<button type="button" class="sel-row" data-act="road" data-i="${r.i}" title="${esc(placeFull(r))}"><span class="dot" style="background:${P[r.prov][2]}"></span><b>${esc(roadName(r))}</b>${infTag(r)}<span class="arrow">→</span><span class="place">${esc(place)}</span><span class="zone">${esc(isZ ? provName(r.prov) : zoneName(r.zone))}</span></button>`;
       }).join('')}</div></div>`;
   }
 
   // ---------- pattern cards ----------
   function chip(r) {
-    const [abbr, , color] = P[r.prov];
-    const tip = r.isP ? `${r.name}：以${r.prov}命名` : `${r.name} → ${r.label}（${r.prov}）`;
+    const color = P[r.prov][2];
+    const tip = r.isP ? T('chipTipP', roadName(r), provName(r.prov)) : T('chipTip', roadName(r), placeShort(r), provName(r.prov));
     const style = r.isP ? `border-color:${color};color:${color};background:transparent` : `border-color:${color};color:${INK};background:${color}`;
     const badge = r.isP ? `background:${color};color:${INK}` : `background:rgba(11,19,34,.82);color:${color}`;
-    return `<span class="chip" title="${esc(tip)}" style="${style};opacity:${roadOn(r) ? 1 : 0.16}"><i style="${badge}">${abbr}</i>${esc(r.name)}</span>`;
+    return `<button type="button" class="chip" data-act="road" data-i="${r.i}" title="${esc(tip)}" style="${style};opacity:${r.on ? 1 : 0.16}"><i style="${badge}">${provAbbr(r.prov)}</i>${esc(roadName(r))}</button>`;
   }
   function renderPatterns() {
     for (const [key, fn] of Object.entries(PATTERNS)) {
@@ -367,113 +672,259 @@
       const groups = new Map();
       let n = 0;
       for (const r of D.roads) {
-        if (r.prov !== p || !roadOn(r)) continue;
+        if (r.prov !== p || !r.on) continue;
         n++;
-        const k = r.isP ? '__P' : r.base;
-        if (!groups.has(k)) groups.set(k, { place: r.isP ? p + '（省名）' : r.label, names: [], zones: [], hay: p + r.label + r.base });
-        const gr = groups.get(k);
-        gr.names.push(r.name);
-        gr.hay += r.name;
+        if (!groups.has(r.city)) groups.set(r.city, { key: r.city, place: isEn() ? r.en[1] : r.isP ? T('provNamed', p) : r.label, roads: [], zones: [] });
+        const gr = groups.get(r.city);
+        gr.roads.push(r);
         if (!gr.zones.includes(r.zone)) gr.zones.push(r.zone);
       }
-      const rows = Array.from(groups.values())
-        .sort((a, b) => b.names.length - a.names.length || zh(a.place, b.place))
-        .filter((x) => !q || x.hay.includes(q));
+      const rows = Array.from(groups.values()).sort((a, b) => b.roads.length - a.roads.length || cmpText(a.place, b.place));
       if (!rows.length) continue;
       shown += rows.length;
       const expanded = !!q || !!state.sel || !!state.open[p];
       const vis = expanded ? rows : rows.slice(0, ROWS_COLLAPSED);
       const more = !q && !state.sel && rows.length > ROWS_COLLAPSED
-        ? `<button type="button" class="more-btn" data-act="toggle" data-id="${p}">${state.open[p] ? '收起' : `展开全部 ${rows.length} 个地名`}</button>` : '';
-      cards.push(`<article class="dir-card"><header><span class="badge" style="background:${P[p][2]}">${P[p][0]}</span><b>${p}</b><span>${n} 条</span></header>
-        ${vis.map((x) => `<div class="dir-row"><b>${esc(x.place)}</b><span>${esc(x.names.join('、'))} <em>· ${esc(x.zones.join('、'))}</em></span></div>`).join('')}${more}</article>`);
+        ? `<button type="button" class="more-btn" data-act="toggle" data-id="${p}">${esc(state.open[p] ? T('collapse') : T('expand', rows.length))}</button>` : '';
+      cards.push(`<article class="dir-card"><header><span class="badge" style="background:${P[p][2]}">${provAbbr(p)}</span><b>${esc(provName(p))}</b><span>${esc(T('nRoads', n))}</span></header>
+        ${vis.map((x) => {
+          const dup = (r) => x.roads.filter((o) => o.name === r.name).length > 1;
+          const names = x.roads.map((r) => `<button type="button" class="rd" data-act="road" data-i="${r.i}">${esc(roadName(r))}${dup(r) ? `<small>（${esc(zoneName(r.zone))}）</small>` : ''}</button>${infTag(r)}`).join(T('sep'));
+          return `<div class="dir-row"><button type="button" class="dir-place" data-act="city" data-key="${esc(x.key)}">${esc(x.place)}</button><span>${names} <em>· ${esc(x.zones.map(zoneName).join(T('sep')))}</em></span></div>`;
+        }).join('')}${more}</article>`);
     }
     $('#dir').innerHTML = cards.join('');
-    $('#dir-summary').textContent = q
-      ? `“${q}”：找到 ${shown} 个地名`
-      : `共 ${Object.keys(D.count).length} 个省级行政区；按每个地名对应的道路数排序，可展开查看全部。`;
+    $('#dir-summary').textContent = q ? (shown ? T('dirQ', q, shown) : T('dirNone', q)) : T('dirAll', Object.keys(D.count).length);
   }
 
   // ---------- stats ----------
   function renderStats() {
+    if (!D) return;
     const m = D.g.meta;
     const v = {
       checked: m.checked.toLocaleString('en-US'), candidates: m.candidates.toLocaleString('en-US'),
-      kept: m.kept, places: m.places, provs: Object.keys(D.count).length, exWords: m.exWords.join('、'),
+      kept: m.kept, places: m.places, provs: Object.keys(D.count).length, exWords: m.exWords.join(T('sep')),
       revCity: m.reverse ? m.reverse['地级'].units : '—', revCounty: m.reverse ? m.reverse['县级市'].units : '—',
     };
     for (const el of $$('[data-stat]')) el.textContent = v[el.dataset.stat];
   }
 
   function renderAll() {
+    computeOn();
+    styleStatic();
     renderScene(); renderLegend(); renderZones(); renderSel(); renderPatterns(); renderDir();
+  }
+
+  // ---------- language ----------
+  const ORIG = new Map(), ORIG_ATTR = new Map();
+  function applyStatic() {
+    const en = state.lang === 'en' && !!EN, dict = en ? window.I18N.en : null;
+    document.documentElement.lang = en ? 'en' : 'zh-CN';
+    document.title = (en ? window.I18N.en : window.I18N.zh).title;
+    for (const el of $$('[data-i18n]')) {
+      if (!ORIG.has(el)) ORIG.set(el, el.innerHTML);
+      const v = dict && dict.html[el.dataset.i18n];
+      el.innerHTML = v != null ? v : ORIG.get(el);
+    }
+    for (const el of $$('[data-i18n-attr]')) {
+      if (!ORIG_ATTR.has(el)) ORIG_ATTR.set(el, {});
+      const orig = ORIG_ATTR.get(el);
+      for (const pair of el.dataset.i18nAttr.split(',')) {
+        const [attr, key] = pair.split(':');
+        if (!(attr in orig)) orig[attr] = el.getAttribute(attr);
+        el.setAttribute(attr, dict && dict.attr[key] != null ? dict.attr[key] : orig[attr]);
+      }
+    }
+    const btn = $('[data-act="lang"]');
+    btn.setAttribute('lang', en ? 'zh' : 'en');
+  }
+  let enLoading = null;
+  function loadEN() {
+    if (EN) return Promise.resolve(EN);
+    enLoading = enLoading || fetch('data/en.json')
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then((e) => { EN = e; if (D) attachEN(); return e; });
+    return enLoading;
+  }
+  function attachEN() {
+    if (!EN || !D) return;
+    if (EN.n !== D.g.roads.length) { EN = null; return; }   // stale file: stay in Chinese
+    D.roads.forEach((r) => { r.en = EN.roads[r.oi]; r.hayEn = norm(r.en.join(' ')); });
+    for (const c of D.cities.values()) c.en = D.roads[c.roads[0]].en[1];
+  }
+  function setLang(lang) {
+    const go = () => {
+      state.lang = lang;
+      try { localStorage.setItem('lang', lang); } catch (err) { /* storage off */ }
+      applyStatic();
+      if (D) { renderStats(); renderAll(); }
+      scheduleURL();
+    };
+    if (lang === 'en') loadEN().then(go).catch(() => {}); else go();
+  }
+
+  // ---------- shareable state in the URL query ----------
+  let urlTimer = null;
+  function scheduleURL() { clearTimeout(urlTimer); urlTimer = setTimeout(writeURL, 350); }
+  function focusParam(f) {
+    if (f.t === 'city') { const c = D.cities.get(f.key); return `c:${c.name}@${c.prov}`; }
+    const r = D.roads[f.i], twins = D.roads.filter((o) => o.name === r.name && o.zone === r.zone);
+    const n = twins.indexOf(r);
+    return `r:${r.name}@${r.zone}${n > 0 ? '~' + n : ''}`;
+  }
+  function parseFocus(s) {
+    const m = /^([rc]):(.+)@([^~]+)(?:~(\d+))?$/.exec(s || '');
+    if (!m) return null;
+    if (m[1] === 'c') { const c = Array.from(D.cities.values()).find((x) => x.name === m[2] && x.prov === m[3]); return c ? { t: 'city', key: c.key } : null; }
+    const r = D.roads.filter((o) => o.name === m[2] && o.zone === m[3])[Number(m[4] || 0)];
+    return r ? { t: 'road', i: r.i } : null;
+  }
+  function writeURL() {
+    if (!D) return;
+    const p = new URLSearchParams();
+    if (state.lang === 'en') p.set('lang', 'en');
+    if (state.sel) p.set('s', `${state.sel.t}:${state.sel.id}`);
+    if (state.q.trim()) p.set('q', state.q.trim());
+    if (state.focus) p.set('f', focusParam(state.focus));
+    if (state.proj === 'lin') p.set('proj', 'lin');
+    if (state.az !== DEFAULT_VIEW.az || state.el !== DEFAULT_VIEW.el) p.set('v', `${state.az},${state.el}`);
+    if (zoomTouched) p.set('z', `${zoom.k.toFixed(2)},${zoom.cx.toFixed(1)},${zoom.cy.toFixed(1)}`);
+    const qs = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',').replace(/%40/gi, '@').replace(/%7E/gi, '~');
+    const url = location.pathname + (qs ? '?' + qs : '') + location.hash;
+    if (url !== location.pathname + location.search + location.hash) history.replaceState(null, '', url);
+  }
+  function readURL() {
+    const p = new URLSearchParams(location.search);
+    const s = /^([prz]):(.+)$/.exec(p.get('s') || '');
+    if (s) {
+      const [, t, id] = s;
+      if ((t === 'p' && D.count[id]) || (t === 'r' && REGIONS.some((x) => x[0] === id)) || (t === 'z' && D.zoneCount[id])) state.sel = { t, id };
+    }
+    state.q = p.get('q') || '';
+    $('#q').value = state.q;
+    if (p.get('proj') === 'lin') state.proj = 'lin';
+    const v = (p.get('v') || '').split(',').map(Number);
+    if (v.length === 2 && v.every(Number.isFinite)) { state.az = wrapDeg(Math.round(v[0])); state.el = Math.max(15, Math.min(75, Math.round(v[1]))); }
+    fitZoom();
+    const z = (p.get('z') || '').split(',').map(Number);
+    if (z.length === 3 && z.every(Number.isFinite)) { zoom = { k: z[0], cx: z[1], cy: z[2] }; clampZoom(); zoomTouched = true; }
+    state.focus = parseFocus(p.get('f'));
+    return ['s', 'q', 'f', 'proj', 'v', 'z'].some((key) => p.has(key));
   }
 
   // ---------- events ----------
   function select(t, id) {
     const cur = state.sel;
     state.sel = cur && cur.t === t && cur.id === id ? null : { t, id };
+    state.focus = null;
+    hover = null;
     fitZoom();
     renderAll();
+    scheduleURL();
   }
   function setView(az, el) {
     state.az = wrapDeg(Math.round(az));
     state.el = Math.max(15, Math.min(75, Math.round(el)));
     queueScene();
+    scheduleURL();
   }
 
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-act]');
-    if (!btn || !D) return;
+    if (!btn) return;
     const { act, id } = btn.dataset;
+    if (act === 'lang') { setLang(state.lang === 'en' ? 'zh' : 'en'); return; }
+    if (!D) return;
     if (act === 'prov') select('p', id);
     else if (act === 'region') select('r', id);
     else if (act === 'zone') select('z', id);
-    else if (act === 'proj') { state.proj = id; fitZoom(); renderScene(); }
+    else if (act === 'road') setFocus({ t: 'road', i: Number(btn.dataset.i) }, { zoom: true, scroll: true });
+    else if (act === 'city') setFocus({ t: 'city', key: btn.dataset.key }, { zoom: true, scroll: true });
+    else if (act === 'unfocus') setFocus(null);
+    else if (act === 'proj') { state.proj = id; buildDistricts(); styleStatic(); fitZoom(); renderScene(); scheduleURL(); }
     else if (act === 'zoomin') { const { w, h } = plane(); zoomAt(w / 2, h / 2, 1.6); }
     else if (act === 'zoomout') { const { w, h } = plane(); zoomAt(w / 2, h / 2, 1 / 1.6); }
-    else if (act === 'zoomfit') { const { w, h } = plane(); zoom = { k: 1, cx: w / 2, cy: h / 2 }; queueScene(); }
-    else if (act === 'clear') { state.sel = null; fitZoom(); renderAll(); }
+    else if (act === 'zoomfit') { const { w, h } = plane(); zoom = { k: 1, cx: w / 2, cy: h / 2 }; zoomTouched = false; queueScene(); scheduleURL(); }
+    else if (act === 'clear') { state.sel = null; state.focus = null; fitZoom(); renderAll(); scheduleURL(); }
     else if (act === 'rotl') setView(state.az - 30, state.el);
     else if (act === 'rotr') setView(state.az + 30, state.el);
     else if (act === 'reset') setView(DEFAULT_VIEW.az, DEFAULT_VIEW.el);
     else if (act === 'toggle') { state.open[id] = !state.open[id]; renderDir(); }
   });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && D && state.focus) setFocus(null); });
   $('#az').addEventListener('input', (e) => setView(Number(e.target.value), state.el));
   $('#el').addEventListener('input', (e) => setView(state.az, Number(e.target.value)));
-  $('#q').addEventListener('input', (e) => { state.q = e.target.value; if (D) renderDir(); });
+  $('#q').addEventListener('input', (e) => {
+    state.q = e.target.value;
+    if (!D) return;
+    computeOn(); styleStatic(); queueScene(); renderLegend(); renderPatterns(); renderDir();
+    scheduleURL();
+  });
+  window.addEventListener('resize', () => { if (D) renderCard(); });
 
-  // drag to rotate; a short tap on a province or a district selects it
+  // pointer input on the scene: drag rotates (or pans once zoomed in), two fingers pinch-zoom the lower map,
+  // a tap picks a dot, a province or a district; the mouse also hovers
   const svg = $('#scene');
-  let drag = null;
-  // once the lower map is zoomed in, dragging on it pans instead
+  const pointers = new Map();
+  let drag = null, pinch = null;
+  const two = () => { const [a, b] = Array.from(pointers.values()); return { mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; };
   svg.addEventListener('pointerdown', (e) => {
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { svg.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+    if (!D) return;
+    if (pointers.size === 2) {
+      const { mid, d } = two(), bp = toBoard(mid.x, mid.y);
+      drag = null;
+      pinch = bp ? { d0: d, k0: zoom.k, m: mapPointAt(bp) } : null;
+      svg.classList.add('dragging');
+      return;
+    }
+    if (pointers.size > 2) return;
     drag = { x: e.clientX, y: e.clientY, az: state.az, el: state.el, moved: false, pan: null };
-    if (D && zoom.k > 1.02) {
+    if (zoom.k > 1.02) {
       const bp = toBoard(e.clientX, e.clientY);
-      if (onBoard(bp)) {
-        const { w, h } = plane();
-        drag.pan = { mx: (bp.u - w / 2) / zoom.k + zoom.cx, my: (bp.v - h / 2) / zoom.k + zoom.cy };
-      }
+      if (onBoard(bp)) drag.pan = mapPointAt(bp);
     }
   });
   svg.addEventListener('pointermove', (e) => {
-    if (!drag) return;
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (!D) return;
+    if (pinch && pointers.size === 2) {
+      const { mid, d } = two(), bp = toBoard(mid.x, mid.y);
+      if (!bp) return;
+      zoom.k = Math.max(1, Math.min(MAX_ZOOM, pinch.k0 * d / pinch.d0));
+      keepUnder(pinch.m, bp);
+      zoomTouched = true;
+      queueScene();
+      scheduleURL();
+      return;
+    }
+    if (!drag) {
+      if (e.pointerType === 'mouse' && !pointers.size) {
+        lastPointer = { x: e.clientX, y: e.clientY };
+        let h = pick(e.clientX, e.clientY, false);
+        if (!h) {
+          const t = e.target.closest && e.target.closest('[data-prov],[data-zone]');
+          if (t) h = t.dataset.prov ? { t: 'prov', id: t.dataset.prov } : { t: 'zone', id: t.dataset.zone };
+        }
+        setHover(h);
+      }
+      return;
+    }
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (!drag.moved) {
       if (Math.abs(dx) + Math.abs(dy) < 5) return;
       drag.moved = true;
       svg.classList.add('dragging');
-      try { svg.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+      setHover(null);
     }
     if (drag.pan) {
       const bp = toBoard(e.clientX, e.clientY);
       if (!bp) return;
-      const { w, h } = plane();
-      zoom.cx = drag.pan.mx - (bp.u - w / 2) / zoom.k;
-      zoom.cy = drag.pan.my - (bp.v - h / 2) / zoom.k;
-      clampZoom();
+      keepUnder(drag.pan, bp);
+      zoomTouched = true;
       queueScene();
+      scheduleURL();
     } else {
       setView(drag.az + dx * 0.35, drag.el - dy * 0.25);
     }
@@ -487,28 +938,53 @@
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
     zoomAt(bp.u, bp.v, Math.exp(-e.deltaY * unit * 0.0015));
   }, { passive: false });
-  const endDrag = (e) => {
-    if (drag && !drag.moved && e.type === 'pointerup') {
-      const t = e.target.closest && e.target.closest('[data-prov],[data-zone]');
-      if (t) select(t.dataset.prov ? 'p' : 'z', t.dataset.prov || t.dataset.zone);
+  function tap(e) {
+    const hit = pick(e.clientX, e.clientY, e.pointerType !== 'mouse');
+    if (hit) { setFocus(same(hit, state.focus) ? null : hit); return; }
+    // the pointer is captured by the SVG, so look up what is actually under it
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const t = under && under.closest && under.closest('[data-prov],[data-zone]');
+    if (t) select(t.dataset.prov ? 'p' : 'z', t.dataset.prov || t.dataset.zone);
+    else if (state.focus) setFocus(null);
+  }
+  const endPointer = (e) => {
+    const wasTap = !!drag && !drag.moved && !pinch && e.type === 'pointerup' && pointers.size === 1;
+    pointers.delete(e.pointerId);
+    if (pinch || pointers.size) {   // lifting one finger of a pinch does not start a rotation
+      if (pointers.size < 2) pinch = null;
+      drag = null;
+      if (!pointers.size) svg.classList.remove('dragging');
+      return;
     }
+    if (wasTap && D) tap(e);
     drag = null;
     svg.classList.remove('dragging');
   };
-  svg.addEventListener('pointerup', endDrag);
-  svg.addEventListener('pointercancel', endDrag);
+  svg.addEventListener('pointerup', endPointer);
+  svg.addEventListener('pointercancel', endPointer);
+  svg.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && D) setHover(null); });
 
   // ---------- load ----------
-  fetch('data/geo.json')
-    .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then((g) => {
-      const roads = g.roads.filter((x) => P[x[2]]).map(([name, base, prov, label, isP, zone, cu, cv, su, sv, lu, lv]) =>
-        ({ name, base, prov, label, isP: !!isP && !CITY_LEVEL.includes(prov), zone, cu, cv, su, sv, lu, lv }));
-      const count = {}, zoneCount = {}, zoneProv = {};
+  const params = new URLSearchParams(location.search);
+  let stored = null;
+  try { stored = localStorage.getItem('lang'); } catch (err) { /* storage off */ }
+  state.lang = (params.get('lang') || stored) === 'en' ? 'en' : 'zh';
+  applyStatic();
+  Promise.all([
+    fetch('data/geo.json').then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+    state.lang === 'en' ? loadEN().catch(() => null) : null,
+  ])
+    .then(([g]) => {
+      const roads = g.roads.map((x, oi) => [x, oi]).filter(([x]) => P[x[2]]).map(([[name, base, prov, label, isP, zone, cu, cv, su, sv, lu, lv, basis, near], oi], i) =>
+        ({ i, oi, name, base, prov, label, isP: !!isP && !CITY_LEVEL.includes(prov), zone, cu, cv, su, sv, lu, lv, basis: basis || '', near: near || '',
+          city: cu + ',' + cv, hay: norm(name + base + base + '路' + label + prov + zone), hayEn: '', en: null }));
+      const count = {}, zoneCount = {}, cities = new Map();
       roads.forEach((r) => {
         count[r.prov] = (count[r.prov] || 0) + 1;
         zoneCount[r.zone] = (zoneCount[r.zone] || 0) + 1;
-        (zoneProv[r.zone] = zoneProv[r.zone] || {})[r.prov] = true;
+        // one dot per city
+        if (!cities.has(r.city)) cities.set(r.city, { key: r.city, cu: r.cu, cv: r.cv, name: r.isP ? r.prov : r.base, prov: r.prov, isP: r.isP, color: P[r.prov][2], roads: [], en: '' });
+        cities.get(r.city).roads.push(r.i);
       });
       // bounding box of every district outline in both projections, for framing a selected district
       const zoneBox = { fish: {}, lin: {} };
@@ -522,13 +998,21 @@
           zoneBox[key][shortZone(d.n)] = [bx0, by0, bx1, by1];
         }
       }
-      D = { g, roads, count, zoneCount, zoneProv, zoneBox };
+      D = { g, roads, count, zoneCount, cities, zoneBox, provOn: {}, filtered: false, nOn: roads.length };
+      attachEN();
+      if (state.lang === 'en' && !EN) state.lang = 'zh';
+      applyStatic();
       zoom = { k: 1, cx: g.fish.w / 2, cy: g.fish.h / 2 };
+      const shared = readURL();
       $('#scene-msg').hidden = true;
       svg.removeAttribute('hidden');
+      buildSkeleton();
+      fitLabelLayer();
+      if (window.ResizeObserver) new ResizeObserver(fitLabelLayer).observe(svg);
       renderStats();
       renderAll();
+      // a shared link opens on the map
+      if (shared && !location.hash) $('#map').scrollIntoView();
     })
-    .catch(() => { $('#scene-msg').textContent = '地图数据未能加载，请刷新页面重试。'; $('#dir-summary').textContent = '数据未能加载。'; });
-
+    .catch(() => { $('#scene-msg').textContent = T('loadFail'); $('#dir-summary').textContent = T('dataFail'); });
 })();
