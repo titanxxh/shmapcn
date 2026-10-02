@@ -73,6 +73,8 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .icon-btn, .text-btn { height: 44px; border-radius: 12px; border: 1px solid var(--control); background: var(--panel); color: var(--text-2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn { width: 44px; }
 .zoom-level { min-width: 76px; font-variant-numeric: tabular-nums; }
+.zoom-group { align-items: center; }
+.zg-label { margin-right: 2px; font-size: 12px; color: var(--muted); }
 .text-btn { padding: 0 16px; font-size: 13px; }
 .icon-btn:hover, .text-btn:hover { color: #fff; border-color: #3A4F78; }
 .controls label { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); }

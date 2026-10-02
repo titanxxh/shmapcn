@@ -12,7 +12,7 @@
   const VW = 1200, VH = 940;
   const DEFAULT_VIEW = { az: -24, el: 30 };
   const ROWS_COLLAPSED = 6;
-  const MAX_ZOOM = 40;
+  const MAX_ZOOM = 40, MAX_ZOOM_TOP = 12;
   const REPO = 'https://github.com/titanxxh/shmapcn';
 
   // province -> [abbreviation, region, colour]; colours stay ≥4.5:1 against the ink used for chip text
@@ -56,8 +56,9 @@
   const state = { sel: null, focus: null, az: DEFAULT_VIEW.az, el: DEFAULT_VIEW.el, q: '', open: {}, proj: 'fish', lang: 'zh' };
   let hover = null;                     // like focus, plus 'zone' / 'prov' while the mouse is over them
   let zoom = { k: 1, cx: 0, cy: 0 };    // 2D view inside the Shanghai board: zoom k around map point (cx, cy)
-  let zoomTouched = false;              // the user zoomed or panned since the last automatic fit
-  let botMatrix = null;                 // board -> SVG coordinates from the last frame, for hit tests
+  let zoomT = { k: 1, cx: 0, cy: 0 };   // the same for the China map on the top plate
+  let zoomTouched = false;              // the user zoomed or panned Shanghai since the last automatic fit
+  let botMatrix = null, topMatrix = null;   // plane -> SVG coordinates from the last frame, for hit tests
   let D = null, EN = null, sk = null;   // data, English names, SVG skeleton
   let lastPointer = null;
 
@@ -198,7 +199,8 @@
   function buildSkeleton() {
     const g = D.g;
     const svg = $('#scene');
-    svg.innerHTML = `<defs><clipPath id="board-clip"><rect id="clip-rect" x="0" y="0" width="1" height="1"/></clipPath></defs>
+    svg.innerHTML = `<defs><clipPath id="board-clip"><rect id="clip-rect" x="0" y="0" width="1" height="1"/></clipPath>
+        <clipPath id="top-clip"><rect x="0" y="0" width="${g.cw}" height="${g.ch}"/></clipPath></defs>
       <polygon id="bot-slab" fill="#060B15" pointer-events="none"/>
       <polygon id="bot-face" fill="#0F192C" stroke="#2A3C5E"/>
       <g id="bot-map" clip-path="url(#board-clip)"><g id="bot-zoom"></g></g>
@@ -206,12 +208,12 @@
       <g id="guides" pointer-events="none"></g>
       <g id="threads" pointer-events="none"></g>
       <polygon id="top-face" fill="#7F9CCB" fill-opacity="0.05" stroke="#3A4F78" stroke-opacity="0.8" pointer-events="none"/>
-      <g id="top-shift" pointer-events="none"><g id="top-extr" opacity="0.6">${g.cn.map((p) => `<path d="${p.d}" fill="#040812"/>`).join('')}</g></g>
-      <g id="top-map">${g.cn.map((p) => `<path d="${p.d}" data-p="${p.n}" stroke="#9FB2D2" stroke-opacity="0.4" stroke-width="0.6" vector-effect="non-scaling-stroke"/>`).join('')}<path d="${g.nh}" fill="#9FB2D2" fill-opacity="0.45" pointer-events="none"/></g>
+      <g id="top-shift" pointer-events="none"><g id="top-extr" opacity="0.6" clip-path="url(#top-clip)"><g id="top-extr-zoom">${g.cn.map((p) => `<path d="${p.d}" fill="#040812"/>`).join('')}</g></g></g>
+      <g id="top-map" clip-path="url(#top-clip)"><g id="top-zoom">${g.cn.map((p) => `<path d="${p.d}" data-p="${p.n}" stroke="#9FB2D2" stroke-opacity="0.4" stroke-width="0.6" vector-effect="non-scaling-stroke"/>`).join('')}<path d="${g.nh}" fill="#9FB2D2" fill-opacity="0.45" pointer-events="none"/></g></g>
       <g id="cdots" pointer-events="none"></g>
       <g id="hl" pointer-events="none"></g>`;
     sk = {};
-    for (const id of ['clip-rect', 'bot-slab', 'bot-face', 'bot-map', 'bot-zoom', 'rdots', 'guides', 'threads', 'top-face', 'top-shift', 'top-extr', 'top-map', 'cdots', 'hl', 'lbls']) {
+    for (const id of ['clip-rect', 'bot-slab', 'bot-face', 'bot-map', 'bot-zoom', 'rdots', 'guides', 'threads', 'top-face', 'top-shift', 'top-extr', 'top-extr-zoom', 'top-map', 'top-zoom', 'cdots', 'hl', 'lbls']) {
       sk[id.replace(/-(\w)/g, (m, c) => c.toUpperCase())] = document.getElementById(id);
     }
     sk.prov = {};
@@ -287,7 +289,12 @@
     // map plane -> board, after zooming; things outside the board are clipped or skipped
     const zu = (u) => (u - zoom.cx) * k + W / 2, zv = (v) => (v - zoom.cy) * k + H / 2;
     const inBoard = (u, v) => u >= -1 && u <= W + 1 && v >= -1 && v <= H + 1;
+    // and the same for the China map on the top plate
+    const kt = zoomT.k, TW = TOP.W, TH = TOP.H;
+    const tu = (u) => (u - zoomT.cx) * kt + TW / 2, tv = (v) => (v - zoomT.cy) * kt + TH / 2;
+    const inTop = (u, v) => u >= -1 && u <= TW + 1 && v >= -1 && v <= TH + 1;
     botMatrix = matArr(BOT, zb);
+    topMatrix = matArr(TOP, zt);
 
     // planes
     sk.clipRect.setAttribute('width', W); sk.clipRect.setAttribute('height', H);
@@ -300,9 +307,12 @@
     sk.topShift.setAttribute('transform', `translate(0 ${f1(sc * 9 * ce)})`);
     sk.topExtr.setAttribute('transform', mat(TOP, zt));
     sk.topMap.setAttribute('transform', mat(TOP, zt));
+    const topZoom = `translate(${f1(TW / 2)} ${f1(TH / 2)}) scale(${kt.toFixed(4)}) translate(${(-zoomT.cx).toFixed(2)} ${(-zoomT.cy).toFixed(2)})`;
+    sk.topZoom.setAttribute('transform', topZoom);
+    sk.topExtrZoom.setAttribute('transform', topZoom);
 
-    // project every city and every road on the board (kept for hit tests, the highlight and the card)
-    for (const c of D.cities.values()) { const [x, y] = pr(TOP, c.cu, c.cv, zt); c.x = x; c.y = y; }
+    // project every city and every road (kept for hit tests, the highlight and the card); vis = inside its zoomed plate
+    for (const c of D.cities.values()) { const u = tu(c.cu), v = tv(c.cv); c.vis = inTop(u, v); [c.x, c.y] = pr(TOP, u, v, zt); }
     for (const r of D.roads) {
       const [u, v] = planeXY(r), bu = zu(u), bv = zv(v);
       r.vis = inBoard(bu, bv);
@@ -317,17 +327,20 @@
       if (!r.vis) continue;
       const color = P[r.prov][2], hi = filtered && r.on, c = D.cities.get(r.city);
       const z = !filtered ? 1 : r.on ? 2 : 0;
-      add(threadG, z + color, [z, `stroke="${color}" stroke-opacity="${filtered ? (r.on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}"`],
-        `M${f1(c.x)} ${f1(c.y)}L${f1(r.bx)} ${f1(r.by)}`);
+      if (c.vis) {   // a thread needs both ends in view
+        add(threadG, z + color, [z, `stroke="${color}" stroke-opacity="${filtered ? (r.on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}"`],
+          `M${f1(c.x)} ${f1(c.y)}L${f1(r.bx)} ${f1(r.by)}`);
+      }
       const rad = (hi ? 3.4 : 2.3) + dotR;
       add(dotG, z + color + r.isP, [z, `fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${r.on ? 1 : 0.2}"`],
         circ(r.bx, r.by, rad));
     }
-    const cityG = new Map();
+    const cityG = new Map(), cityR = kt >= 3 ? 0.8 : 0;
     for (const c of D.cities.values()) {
+      if (!c.vis) continue;
       const hi = filtered && c.on, z = !filtered ? 1 : c.on ? 2 : 0;
       add(cityG, z + c.color + c.isP, [z, `fill="${c.isP ? 'none' : c.color}" stroke="${c.isP ? c.color : INK}" stroke-width="${c.isP ? 1.5 : 0.7}" opacity="${c.on ? 1 : 0.2}"`],
-        circ(c.x, c.y, hi ? 3.6 : 2.4));
+        circ(c.x, c.y, (hi ? 3.6 : 2.4) + cityR));
     }
     const paths = (map, extra) => Array.from(map.values()).sort((a, b) => a.attrs[0] - b.attrs[0])
       .map((e) => `<path d="${e.d.join('')}" ${e.attrs[1]}${extra}/>`).join('');
@@ -335,10 +348,11 @@
     sk.threads.innerHTML = paths(threadG, ' fill="none" stroke-linecap="round"');
     sk.cdots.innerHTML = paths(cityG, '');
     const sh = g.cn.find((p) => p.n === '上海');
-    if (sh) {
-      const [sx, sy] = pr(TOP, sh.lx, sh.ly, zt);
+    const shu = sh && tu(sh.lx), shv = sh && tv(sh.ly);
+    if (sh && inTop(shu, shv)) {
+      const [sx, sy] = pr(TOP, shu, shv, zt);
       sk.guides.innerHTML = `<path d="${botFace.map(([bx, by]) => `M${f1(sx)} ${f1(sy)}L${f1(bx)} ${f1(by)}`).join('')}" stroke="#EEF2F8" stroke-opacity="0.18" stroke-dasharray="3 6" fill="none"/>`;
-    }
+    } else sk.guides.innerHTML = '';
 
     // labels
     const cands = [];
@@ -348,7 +362,7 @@
       if (r.vis) cands.push({ key: 'fr' + r.i, x: r.bx, y: r.by, text: roadName(r), size: 12, weight: 700, fill: '#FFFFFF', pri: 100, alts: BESIDE });
     }
     const fc = state.focus && D.cities.get(focusCity);
-    if (fc && !fc.isP) {   // a province is already labelled on the map
+    if (fc && fc.vis && !fc.isP) {   // a province is already labelled on the map
       const c = fc;
       cands.push({ key: 'fc' + c.key, x: c.x, y: c.y, text: cityName(c), size: 12, weight: 700, fill: '#FFFFFF', pri: 100, alts: AROUND });
     }
@@ -362,15 +376,17 @@
     }
     for (const p of g.cn) {
       if (!D.count[p.n] && p.n !== '上海') continue;
-      const [x, y] = pr(TOP, p.lx, p.ly, zt);
+      const pu = tu(p.lx), pv = tv(p.ly);
+      if (!inTop(pu, pv)) continue;
+      const [x, y] = pr(TOP, pu, pv, zt);
       const on = p.n === '上海' || isOn(p.n);
       cands.push({ key: 'p' + p.n, x, y, text: provName(p.n), size: en ? 10 : 11, weight: 700, pri: on ? 50 : 45, alts: [[0, 14, 'middle'], [0, -8, 'middle']],
         fill: p.n === '上海' ? '#FFFFFF' : '#DCE3EE', op: on ? 0.9 : 0.25 });
     }
     // city and road names: for a selection or a short search result, or once zoomed in far enough to read them
-    const litCities = filtered ? Array.from(D.cities.values()).filter((c) => c.on) : [];
-    const cityLabels = (!!sel && (sel.t === 'p' || sel.t === 'z')) || (!!state.q.trim() && litCities.length <= 80);
-    if (cityLabels) {
+    const litCities = Array.from(D.cities.values()).filter((c) => c.vis && (!filtered || c.on));
+    const cityLabels = (!!sel && (sel.t === 'p' || sel.t === 'z')) || (!!state.q.trim() && litCities.length <= 80) || (kt >= 2 && litCities.length <= 150);
+    if (cityLabels && (filtered || kt >= 2)) {
       for (const c of litCities) if (!c.isP && c.key !== focusCity) cands.push({ key: 'c' + c.key, x: c.x, y: c.y, text: cityName(c), size: 11, weight: 700, fill: '#F4F6FA', cls: 'lbl-sel', pri: 30 + Math.min(c.roads.length, 9) / 10, alts: AROUND });
     }
     const labelled = D.roads.filter((r) => r.vis && (!filtered || r.on));
@@ -391,6 +407,7 @@
     $('#el').value = state.el;
     for (const b of $$('[data-act="proj"]')) b.setAttribute('aria-pressed', String(b.dataset.id === state.proj));
     $('#zoom-level').textContent = k < 1.05 ? T('whole') : k.toFixed(1) + '×';
+    $('#zoom-level-top').textContent = kt < 1.05 ? T('wholeTop') : kt.toFixed(1) + '×';
   }
 
   let sceneQueued = false;
@@ -407,12 +424,13 @@
       const c = D.cities.get(r.city), color = P[r.prov][2];
       if (r.vis) {
         const d = `M${f1(c.x)} ${f1(c.y)}L${f1(r.bx)} ${f1(r.by)}`;
-        out.push(`<path d="${d}" stroke="${INK}" stroke-opacity="0.7" stroke-width="4.5" stroke-linecap="round"/><path d="${d}" stroke="${color}" stroke-width="2.2" stroke-linecap="round"/>`,
-          `<path d="${circ(r.bx, r.by, 5)}" fill="${r.isP ? INK : color}" stroke="#FFFFFF" stroke-width="1.6"/>`);
+        if (c.vis) out.push(`<path d="${d}" stroke="${INK}" stroke-opacity="0.7" stroke-width="4.5" stroke-linecap="round"/><path d="${d}" stroke="${color}" stroke-width="2.2" stroke-linecap="round"/>`);
+        out.push(`<path d="${circ(r.bx, r.by, 5)}" fill="${r.isP ? INK : color}" stroke="#FFFFFF" stroke-width="1.6"/>`);
         if (labels) out.push(`<text class="lbl" x="${f1(r.bx + 8)}" y="${f1(r.by + 4)}" fill="#FFFFFF" style="font-size:12px;font-weight:700">${esc(roadName(r))}</text>`);
       }
     };
     const city = (c, labels) => {
+      if (!c.vis) return;
       out.push(`<path d="${circ(c.x, c.y, 5.2)}" fill="${c.isP ? INK : c.color}" stroke="#FFFFFF" stroke-width="1.6"/>`);
       if (labels) out.push(`<text class="lbl" x="${f1(c.x + 8)}" y="${f1(c.y - 7)}" fill="#FFFFFF" style="font-size:12px;font-weight:700">${esc(cityName(c))}</text>`);
     };
@@ -466,10 +484,12 @@
     else if (ctm) {
       const r = t.t === 'road' ? D.roads[t.i] : null;
       const c = D.cities.get(r ? r.city : t.key);
-      const [x, y] = r && r.vis ? [r.bx, r.by] : [c.x, c.y];
-      const p = svg.createSVGPoint(); p.x = x; p.y = y;
-      const q = p.matrixTransform(ctm);
-      cx = q.x; cy = q.y;
+      const at = r && r.vis ? [r.bx, r.by] : c.vis ? [c.x, c.y] : null;
+      if (at) {
+        const p = svg.createSVGPoint(); p.x = at[0]; p.y = at[1];
+        const q = p.matrixTransform(ctm);
+        cx = q.x; cy = q.y;
+      } else { cx = scene.left - 8; cy = scene.top - 8; }   // both ends zoomed out of view: park it in the corner
     } else { card.hidden = true; return; }
     const svgBox = svg.getBoundingClientRect();
     const w = card.offsetWidth, h = card.offsetHeight;
@@ -494,6 +514,7 @@
       if (d < bd) { bd = d; best = { t: 'road', i: r.i }; }
     }
     for (const c of D.cities.values()) {
+      if (!c.vis) continue;
       const d = (c.x - q.x) ** 2 + (c.y - q.y) ** 2;
       if (d < bd) { bd = d; best = { t: 'city', key: c.key }; }
     }
@@ -529,15 +550,21 @@
     zoom = { k, cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
     clampZoom();
     zoomTouched = true;
+    // if China is zoomed in and the city is out of view, slide the top map to it
+    const c = D.cities.get(state.focus.t === 'road' ? D.roads[state.focus.i].city : state.focus.key);
+    const tw = D.g.cw / (2 * zoomT.k), th = D.g.ch / (2 * zoomT.k);
+    if (Math.abs(c.cu - zoomT.cx) > tw * 0.9 || Math.abs(c.cv - zoomT.cy) > th * 0.9) { zoomT.cx = c.cu; zoomT.cy = c.cv; clampZoom('top'); }
   }
 
-  // ---------- zoom of the lower map ----------
-  function clampZoom() {
-    const { w, h } = plane();
-    zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k));
-    const hw = w / (2 * zoom.k), hh = h / (2 * zoom.k);
-    zoom.cx = Math.max(hw, Math.min(w - hw, zoom.cx));
-    zoom.cy = Math.max(hh, Math.min(h - hh, zoom.cy));
+  // ---------- zoom: each plate ('bot' = Shanghai, 'top' = China) has its own view ----------
+  const zoomOf = (L) => (L === 'top' ? zoomT : zoom);
+  const sizeOf = (L) => (L === 'top' ? { w: D.g.cw, h: D.g.ch } : plane());
+  function clampZoom(L = 'bot') {
+    const z = zoomOf(L), { w, h } = sizeOf(L);
+    z.k = Math.max(1, Math.min(L === 'top' ? MAX_ZOOM_TOP : MAX_ZOOM, z.k));
+    const hw = w / (2 * z.k), hh = h / (2 * z.k);
+    z.cx = Math.max(hw, Math.min(w - hw, z.cx));
+    z.cy = Math.max(hh, Math.min(h - hh, z.cy));
   }
   // frame the selected district (its outline) or the roads of the selected province / region
   function fitZoom() {
@@ -555,34 +582,46 @@
     zoom = { k: Math.min(w / (bw * 1.2), h / (bh * 1.2)), cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
     clampZoom();
   }
-  // client point -> board coordinates of the lower map (null when the view is edge-on)
-  function toBoard(clientX, clientY) {
-    if (!botMatrix) return null;
+  // client point -> coordinates on a plate (null when the view is edge-on)
+  function toPlane(L, clientX, clientY) {
+    const M = L === 'top' ? topMatrix : botMatrix;
+    if (!M) return null;
     const svgEl = $('#scene'), ctm = svgEl.getScreenCTM();
     if (!ctm) return null;
     const pt = svgEl.createSVGPoint();
     pt.x = clientX; pt.y = clientY;
     const p = pt.matrixTransform(ctm.inverse());
-    const [a, b, c, d, e, f] = botMatrix, det = a * d - b * c;
+    const [a, b, c, d, e, f] = M, det = a * d - b * c;
     if (Math.abs(det) < 1e-9) return null;
     const x = p.x - e, y = p.y - f;
     return { u: (d * x - c * y) / det, v: (-b * x + a * y) / det };
   }
-  const onBoard = (bp) => { const { w, h } = plane(); return !!bp && bp.u >= 0 && bp.u <= w && bp.v >= 0 && bp.v <= h; };
-  const mapPointAt = (bp) => { const { w, h } = plane(); return { mx: (bp.u - w / 2) / zoom.k + zoom.cx, my: (bp.v - h / 2) / zoom.k + zoom.cy }; };
-  function keepUnder(m, bp) {   // move the view so map point m sits under board point bp
-    const { w, h } = plane();
-    zoom.cx = m.mx - (bp.u - w / 2) / zoom.k;
-    zoom.cy = m.my - (bp.v - h / 2) / zoom.k;
-    clampZoom();
+  const onPlane = (L, bp) => { const { w, h } = sizeOf(L); return !!bp && bp.u >= 0 && bp.u <= w && bp.v >= 0 && bp.v <= h; };
+  const mapPointAt = (L, bp) => { const z = zoomOf(L), { w, h } = sizeOf(L); return { mx: (bp.u - w / 2) / z.k + z.cx, my: (bp.v - h / 2) / z.k + z.cy }; };
+  function keepUnder(L, m, bp) {   // move the view so map point m sits under plate point bp
+    const z = zoomOf(L), { w, h } = sizeOf(L);
+    z.cx = m.mx - (bp.u - w / 2) / z.k;
+    z.cy = m.my - (bp.v - h / 2) / z.k;
+    clampZoom(L);
+    if (L === 'bot') zoomTouched = true;
   }
-  function zoomAt(u, v, factor) {
-    const m = mapPointAt({ u, v });   // map point under the cursor stays put
-    zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k * factor));
-    keepUnder(m, { u, v });
-    zoomTouched = true;
+  function zoomAt(L, u, v, factor) {
+    const z = zoomOf(L), m = mapPointAt(L, { u, v });   // map point under the cursor stays put
+    z.k = Math.max(1, Math.min(L === 'top' ? MAX_ZOOM_TOP : MAX_ZOOM, z.k * factor));
+    keepUnder(L, m, { u, v });
     queueScene();
     scheduleURL();
+  }
+  // which plate a client point is on; where the two overlap on screen, the top one only over China itself
+  function layerAt(clientX, clientY) {
+    const tp = toPlane('top', clientX, clientY), bp = toPlane('bot', clientX, clientY);
+    const onT = onPlane('top', tp), onB = onPlane('bot', bp);
+    if (onT && onB) {
+      const m = mapPointAt('top', tp), pt = $('#scene').createSVGPoint();
+      pt.x = m.mx; pt.y = m.my;
+      return Object.values(sk.prov).some((el) => el.isPointInFill(pt)) ? 'top' : 'bot';
+    }
+    return onT ? 'top' : onB ? 'bot' : null;
   }
 
   // ---------- legend ----------
@@ -789,6 +828,7 @@
     if (state.proj === 'lin') p.set('proj', 'lin');
     if (state.az !== DEFAULT_VIEW.az || state.el !== DEFAULT_VIEW.el) p.set('v', `${state.az},${state.el}`);
     if (zoomTouched) p.set('z', `${zoom.k.toFixed(2)},${zoom.cx.toFixed(1)},${zoom.cy.toFixed(1)}`);
+    if (zoomT.k > 1.01) p.set('zt', `${zoomT.k.toFixed(2)},${zoomT.cx.toFixed(1)},${zoomT.cy.toFixed(1)}`);
     const qs = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',').replace(/%40/gi, '@').replace(/%7E/gi, '~');
     const url = location.pathname + (qs ? '?' + qs : '') + location.hash;
     if (url !== location.pathname + location.search + location.hash) history.replaceState(null, '', url);
@@ -808,8 +848,10 @@
     fitZoom();
     const z = (p.get('z') || '').split(',').map(Number);
     if (z.length === 3 && z.every(Number.isFinite)) { zoom = { k: z[0], cx: z[1], cy: z[2] }; clampZoom(); zoomTouched = true; }
+    const zt = (p.get('zt') || '').split(',').map(Number);
+    if (zt.length === 3 && zt.every(Number.isFinite)) { zoomT = { k: zt[0], cx: zt[1], cy: zt[2] }; clampZoom('top'); }
     state.focus = parseFocus(p.get('f'));
-    return ['s', 'q', 'f', 'proj', 'v', 'z'].some((key) => p.has(key));
+    return ['s', 'q', 'f', 'proj', 'v', 'z', 'zt'].some((key) => p.has(key));
   }
 
   // ---------- events ----------
@@ -842,9 +884,14 @@
     else if (act === 'city') setFocus({ t: 'city', key: btn.dataset.key }, { zoom: true, scroll: true });
     else if (act === 'unfocus') setFocus(null);
     else if (act === 'proj') { state.proj = id; buildDistricts(); styleStatic(); fitZoom(); renderScene(); scheduleURL(); }
-    else if (act === 'zoomin') { const { w, h } = plane(); zoomAt(w / 2, h / 2, 1.6); }
-    else if (act === 'zoomout') { const { w, h } = plane(); zoomAt(w / 2, h / 2, 1 / 1.6); }
-    else if (act === 'zoomfit') { const { w, h } = plane(); zoom = { k: 1, cx: w / 2, cy: h / 2 }; zoomTouched = false; queueScene(); scheduleURL(); }
+    else if (act === 'zoomin' || act === 'zoomout') {
+      const L = btn.dataset.layer === 'top' ? 'top' : 'bot', { w, h } = sizeOf(L);
+      zoomAt(L, w / 2, h / 2, act === 'zoomin' ? 1.6 : 1 / 1.6);
+    } else if (act === 'zoomfit') {
+      const L = btn.dataset.layer === 'top' ? 'top' : 'bot', { w, h } = sizeOf(L), z = { k: 1, cx: w / 2, cy: h / 2 };
+      if (L === 'top') zoomT = z; else { zoom = z; zoomTouched = false; }
+      queueScene(); scheduleURL();
+    }
     else if (act === 'clear') { state.sel = null; state.focus = null; fitZoom(); renderAll(); scheduleURL(); }
     else if (act === 'rotl') setView(state.az - 30, state.el);
     else if (act === 'rotr') setView(state.az + 30, state.el);
@@ -862,8 +909,8 @@
   });
   window.addEventListener('resize', () => { if (D) renderCard(); });
 
-  // pointer input on the scene: drag rotates (or pans once zoomed in), two fingers pinch-zoom the lower map,
-  // a tap picks a dot, a province or a district; the mouse also hovers
+  // pointer input on the scene: drag rotates (or pans a plate once it is zoomed in), two fingers pinch-zoom the
+  // plate between them, a tap picks a dot, a province or a district; the mouse also hovers
   const svg = $('#scene');
   const pointers = new Map();
   let drag = null, pinch = null;
@@ -873,28 +920,25 @@
     try { svg.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     if (!D) return;
     if (pointers.size === 2) {
-      const { mid, d } = two(), bp = toBoard(mid.x, mid.y);
+      const { mid, d } = two(), L = layerAt(mid.x, mid.y) || 'bot', bp = toPlane(L, mid.x, mid.y);
       drag = null;
-      pinch = bp ? { d0: d, k0: zoom.k, m: mapPointAt(bp) } : null;
+      pinch = bp ? { L, d0: d, k0: zoomOf(L).k, m: mapPointAt(L, bp) } : null;
       svg.classList.add('dragging');
       return;
     }
     if (pointers.size > 2) return;
     drag = { x: e.clientX, y: e.clientY, az: state.az, el: state.el, moved: false, pan: null };
-    if (zoom.k > 1.02) {
-      const bp = toBoard(e.clientX, e.clientY);
-      if (onBoard(bp)) drag.pan = mapPointAt(bp);
-    }
+    const L = layerAt(e.clientX, e.clientY);
+    if (L && zoomOf(L).k > 1.02) drag.pan = { L, m: mapPointAt(L, toPlane(L, e.clientX, e.clientY)) };
   });
   svg.addEventListener('pointermove', (e) => {
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (!D) return;
     if (pinch && pointers.size === 2) {
-      const { mid, d } = two(), bp = toBoard(mid.x, mid.y);
+      const { mid, d } = two(), bp = toPlane(pinch.L, mid.x, mid.y);
       if (!bp) return;
-      zoom.k = Math.max(1, Math.min(MAX_ZOOM, pinch.k0 * d / pinch.d0));
-      keepUnder(pinch.m, bp);
-      zoomTouched = true;
+      zoomOf(pinch.L).k = pinch.k0 * d / pinch.d0;
+      keepUnder(pinch.L, pinch.m, bp);
       queueScene();
       scheduleURL();
       return;
@@ -919,24 +963,24 @@
       setHover(null);
     }
     if (drag.pan) {
-      const bp = toBoard(e.clientX, e.clientY);
+      const bp = toPlane(drag.pan.L, e.clientX, e.clientY);
       if (!bp) return;
-      keepUnder(drag.pan, bp);
-      zoomTouched = true;
+      keepUnder(drag.pan.L, drag.pan.m, bp);
       queueScene();
       scheduleURL();
     } else {
       setView(drag.az + dx * 0.35, drag.el - dy * 0.25);
     }
   });
-  // the wheel zooms the lower map only while the pointer is over it, so the page still scrolls elsewhere
+  // the wheel zooms the plate under the pointer (China above, Shanghai below); elsewhere the page scrolls
   svg.addEventListener('wheel', (e) => {
     if (!D) return;
-    const bp = toBoard(e.clientX, e.clientY);
-    if (!onBoard(bp)) return;
+    const L = layerAt(e.clientX, e.clientY);
+    if (!L) return;
     e.preventDefault();
+    const bp = toPlane(L, e.clientX, e.clientY);
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
-    zoomAt(bp.u, bp.v, Math.exp(-e.deltaY * unit * 0.0015));
+    zoomAt(L, bp.u, bp.v, Math.exp(-e.deltaY * unit * 0.0015));
   }, { passive: false });
   function tap(e) {
     const hit = pick(e.clientX, e.clientY, e.pointerType !== 'mouse');
@@ -1003,6 +1047,7 @@
       if (state.lang === 'en' && !EN) state.lang = 'zh';
       applyStatic();
       zoom = { k: 1, cx: g.fish.w / 2, cy: g.fish.h / 2 };
+      zoomT = { k: 1, cx: g.cw / 2, cy: g.ch / 2 };
       const shared = readURL();
       $('#scene-msg').hidden = true;
       svg.removeAttribute('hidden');
