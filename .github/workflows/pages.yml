@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main, claude/epic-ride-gx5qdf]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
