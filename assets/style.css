@@ -24,7 +24,7 @@ html[lang=en] {
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { scroll-behavior: smooth; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   margin: 0;
   background: var(--bg);
@@ -33,8 +33,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 a { color: var(--text-2); text-decoration: none; }
-a:hover { color: #fff; }
-button { font-family: inherit; }
+/* no double-tap page zoom on controls (iOS), no grey tap flash */
+button { font-family: inherit; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 
 .wrap { max-width: 1280px; margin: 0 auto; padding-left: 40px; padding-right: 40px; }
 .kicker { font-size: 12px; letter-spacing: 0.2em; color: var(--muted); }
@@ -50,7 +50,6 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .nav-links { display: flex; align-items: center; gap: 4px; font-size: 14px; }
 .nav-links a { padding: 12px; }
 .lang-btn { min-width: 44px; height: 36px; margin-left: 8px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--control); background: var(--panel); color: var(--text-2); font-size: 13px; font-weight: 700; cursor: pointer; }
-.lang-btn:hover { color: #fff; border-color: #3A4F78; }
 
 /* hero */
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: end; padding-top: 64px; padding-bottom: 48px; }
@@ -64,7 +63,7 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 
 /* 3D scene */
 .scene { position: relative; background: var(--scene); border: 1px solid var(--line); border-radius: 24px; overflow: hidden; }
-.scene svg { display: block; width: 100%; height: auto; touch-action: none; cursor: grab; user-select: none; font-family: var(--sans); }
+.scene svg { display: block; width: 100%; height: auto; touch-action: none; cursor: grab; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; font-family: var(--sans); }
 .scene svg.pointing { cursor: pointer; }
 .scene svg.dragging { cursor: grabbing; }
 .scene-msg { height: 560px; display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--muted); }
@@ -76,7 +75,6 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .zoom-group { align-items: center; }
 .zg-label { margin-right: 2px; font-size: 12px; color: var(--muted); }
 .text-btn { padding: 0 16px; font-size: 13px; }
-.icon-btn:hover, .text-btn:hover { color: #fff; border-color: #3A4F78; }
 .controls label { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); }
 .controls input[type=range] { width: 150px; accent-color: #6AA6FF; }
 .hint { margin-left: auto; font-size: 12px; color: var(--muted); }
@@ -105,7 +103,6 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .mc-list li span { font-size: 12px; color: var(--muted); }
 .mc-report { display: inline-block; margin-top: 8px; font-size: 12px; text-decoration: underline; }
 .mc-close { position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; border-radius: 50%; border: 0; background: transparent; color: var(--text-2); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
-.mc-close:hover { color: #fff; background: #1B2840; }
 .inf { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 6px; border: 1px dashed #5B6E91; font-size: 10px; font-weight: 500; line-height: 16px; color: var(--muted); white-space: nowrap; cursor: help; }
 
 .seg { display: inline-flex; border: 1px solid var(--control); border-radius: 12px; overflow: hidden; }
@@ -149,7 +146,6 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .close-btn { width: 44px; height: 44px; flex-shrink: 0; border-radius: 50%; border: 1px solid var(--control); background: transparent; color: var(--text-2); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .selgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 24px; }
 .sel-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 9px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
-.sel-row:hover b { text-decoration: underline; }
 .sel-row .dot { width: 8px; height: 8px; flex-shrink: 0; align-self: center; border-radius: 50%; }
 .sel-row b { color: var(--text-strong); white-space: nowrap; }
 .sel-row .arrow { color: var(--faint); }
@@ -172,16 +168,15 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .card p { margin: 0; font-size: 14px; line-height: 1.8; color: var(--text-2); }
 .card p.note { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12.5px; line-height: 1.7; color: var(--muted); }
 .src { font-size: 12px; color: var(--faint); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
-.src:hover { color: var(--text-2); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip-label { font-size: 12px; color: var(--muted); }
 .chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px 0 3px; border-radius: 13px; border: 1.5px solid; font-family: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
-.chip:hover { filter: brightness(1.12); }
 .chip i { width: 19px; height: 19px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-style: normal; }
 
 /* directory */
 .search { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); min-width: 280px; }
-.search input { height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--control); background: var(--panel); color: var(--text); font-family: inherit; font-size: 14px; }
+/* 16px: iOS Safari zooms the page into any input with smaller text */
+.search input { height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--control); background: var(--panel); color: var(--text); font-family: inherit; font-size: 16px; -webkit-appearance: none; appearance: none; }
 .dir-summary { margin: 0; font-size: 13px; color: var(--muted); }
 .dir { column-count: 4; column-gap: 16px; }
 .dir-card { break-inside: avoid; margin: 0 0 16px; padding: 16px 16px 10px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 16px; }
@@ -194,7 +189,6 @@ section { display: flex; flex-direction: column; gap: 20px; padding-bottom: 80px
 .dir-place { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--text-strong); font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
 .rd { padding: 0; border: 0; background: none; color: var(--text-2); font: inherit; text-align: left; cursor: pointer; }
 .rd small { font-size: 11px; color: var(--faint); }
-.dir-place:hover, .rd:hover { color: #fff; text-decoration: underline; }
 .dir-row em { font-style: normal; font-size: 12px; color: var(--faint); }
 .more-btn { width: 100%; min-height: 44px; margin-top: 6px; border-radius: 10px; border: 1px solid var(--control); background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; }
 
@@ -203,6 +197,18 @@ footer { padding-top: 32px; padding-bottom: 64px; }
 .foot { display: flex; flex-direction: column; gap: 12px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.8; color: var(--muted); }
 .foot p { margin: 0; max-width: 64em; }
 .foot a { text-decoration: underline; }
+
+/* hover effects only where there is a real pointer; on touch screens they stick after a tap */
+@media (hover: hover) {
+  a:hover { color: #fff; }
+  .lang-btn:hover { color: #fff; border-color: #3A4F78; }
+  .icon-btn:hover, .text-btn:hover { color: #fff; border-color: #3A4F78; }
+  .mc-close:hover { color: #fff; background: #1B2840; }
+  .sel-row:hover b { text-decoration: underline; }
+  .src:hover { color: var(--text-2); }
+  .chip:hover { filter: brightness(1.12); }
+  .dir-place:hover, .rd:hover { color: #fff; text-decoration: underline; }
+}
 
 @media (max-width: 1100px) {
   .legend, .selgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

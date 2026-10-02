@@ -217,7 +217,7 @@
       sk[id.replace(/-(\w)/g, (m, c) => c.toUpperCase())] = document.getElementById(id);
     }
     sk.prov = {};
-    for (const el of sk.topMap.querySelectorAll('[data-p]')) sk.prov[el.dataset.p] = el;
+    for (const el of sk.topMap.querySelectorAll('[data-p]')) sk.prov[el.getAttribute('data-p')] = el;   // getAttribute: older Safari has no dataset on SVG
     buildDistricts();
   }
   function buildDistricts() {
@@ -227,7 +227,7 @@
     sk.river = document.getElementById('river');
     sk.zone = {};
     for (const el of sk.botZoom.querySelectorAll('[data-z]')) {
-      const z = el.dataset.z;
+      const z = el.getAttribute('data-z');
       sk.zone[z] = el;
       if (D.zoneCount[z]) { el.setAttribute('data-zone', z); el.style.cursor = 'pointer'; }
     }
@@ -619,7 +619,7 @@
     if (onT && onB) {
       const m = mapPointAt('top', tp), pt = $('#scene').createSVGPoint();
       pt.x = m.mx; pt.y = m.my;
-      return Object.values(sk.prov).some((el) => el.isPointInFill(pt)) ? 'top' : 'bot';
+      try { return Object.values(sk.prov).some((el) => el.isPointInFill(pt)) ? 'top' : 'bot'; } catch (err) { return 'top'; }
     }
     return onT ? 'top' : onB ? 'bot' : null;
   }
@@ -831,7 +831,8 @@
     if (zoomT.k > 1.01) p.set('zt', `${zoomT.k.toFixed(2)},${zoomT.cx.toFixed(1)},${zoomT.cy.toFixed(1)}`);
     const qs = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',').replace(/%40/gi, '@').replace(/%7E/gi, '~');
     const url = location.pathname + (qs ? '?' + qs : '') + location.hash;
-    if (url !== location.pathname + location.search + location.hash) history.replaceState(null, '', url);
+    // Safari throws if replaceState is called too often; the URL is a convenience, so just skip that update
+    if (url !== location.pathname + location.search + location.hash) try { history.replaceState(null, '', url); } catch (err) { /* rate-limited */ }
   }
   function readURL() {
     const p = new URLSearchParams(location.search);
@@ -949,7 +950,7 @@
         let h = pick(e.clientX, e.clientY, false);
         if (!h) {
           const t = e.target.closest && e.target.closest('[data-prov],[data-zone]');
-          if (t) h = t.dataset.prov ? { t: 'prov', id: t.dataset.prov } : { t: 'zone', id: t.dataset.zone };
+          if (t) h = t.hasAttribute('data-prov') ? { t: 'prov', id: t.getAttribute('data-prov') } : { t: 'zone', id: t.getAttribute('data-zone') };
         }
         setHover(h);
       }
@@ -980,15 +981,35 @@
     e.preventDefault();
     const bp = toPlane(L, e.clientX, e.clientY);
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
-    zoomAt(L, bp.u, bp.v, Math.exp(-e.deltaY * unit * 0.0015));
+    // a trackpad pinch in Chrome / Edge / Firefox arrives as ctrl+wheel with small deltas
+    zoomAt(L, bp.u, bp.v, Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.0015)));
   }, { passive: false });
+  // Safari: a trackpad pinch on a Mac arrives as gesture events (not wheel), and iOS may still try to zoom the
+  // page on a two-finger pinch over the map. Take both over; on a touch screen the pointer pinch above does the zoom.
+  let gesture = null;
+  svg.addEventListener('gesturestart', (e) => {
+    e.preventDefault();
+    gesture = null;
+    if (!D || pointers.size >= 2) return;
+    const L = layerAt(e.clientX, e.clientY), bp = L && toPlane(L, e.clientX, e.clientY);
+    if (bp) gesture = { L, bp, k0: zoomOf(L).k, m: mapPointAt(L, bp) };
+  }, { passive: false });
+  svg.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    if (!gesture || pointers.size >= 2) return;
+    zoomOf(gesture.L).k = gesture.k0 * e.scale;
+    keepUnder(gesture.L, gesture.m, gesture.bp);
+    queueScene();
+    scheduleURL();
+  }, { passive: false });
+  svg.addEventListener('gestureend', (e) => { e.preventDefault(); gesture = null; }, { passive: false });
   function tap(e) {
     const hit = pick(e.clientX, e.clientY, e.pointerType !== 'mouse');
     if (hit) { setFocus(same(hit, state.focus) ? null : hit); return; }
     // the pointer is captured by the SVG, so look up what is actually under it
     const under = document.elementFromPoint(e.clientX, e.clientY);
     const t = under && under.closest && under.closest('[data-prov],[data-zone]');
-    if (t) select(t.dataset.prov ? 'p' : 'z', t.dataset.prov || t.dataset.zone);
+    if (t) select(t.hasAttribute('data-prov') ? 'p' : 'z', t.getAttribute('data-prov') || t.getAttribute('data-zone'));
     else if (state.focus) setFocus(null);
   }
   const endPointer = (e) => {
