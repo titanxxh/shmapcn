@@ -45,7 +45,7 @@
       <div class="kicker">01 · 双层地图</div>
       <h2>城市在上，道路在下</h2>
     </div>
-    <p>上层是全国地图，每个光点是一座被借用了名字的城市或县；下层是全上海，每个点是一条道路的实际位置，中心城区做了放大。细线把城市连到以它命名的道路，颜色区分省份，空心点为以省名命名的道路。</p>
+    <p>上层是全国地图，每个光点是一座被借用了名字的城市或县；下层是全上海，每个点是一条道路的实际位置，默认放大中心城区，也可切换为真实比例。细线把城市连到以它命名的道路，颜色区分省份，空心点为以省名命名的道路。点上层的省份或下层的区，都能看到对应的连线。</p>
   </div>
 
   <div class="scene">
@@ -61,14 +61,22 @@
         </button>
         <button type="button" class="text-btn" data-act="reset">复位视角</button>
       </div>
+      <div class="seg" role="group" aria-label="下层上海地图的比例">
+        <button type="button" data-act="proj" data-id="fish" aria-pressed="true">中心放大</button>
+        <button type="button" data-act="proj" data-id="lin" aria-pressed="false">真实比例</button>
+      </div>
       <label>旋转 <input id="az" type="range" min="-180" max="180" step="1" value="-24"></label>
       <label>俯仰 <input id="el" type="range" min="15" max="75" step="1" value="30"></label>
-      <span class="hint">拖动画面旋转 · 点击省份查看对应道路</span>
+      <span class="hint">拖动画面旋转 · 点击省份或区查看对应道路</span>
     </div>
   </div>
 
   <div id="legend" class="legend"></div>
-  <div id="sel"><p class="sel-hint">点选上方的省份或地区，地图中对应的连线会被点亮，并在此列出全部道路。</p></div>
+  <div class="zones-wrap">
+    <span class="zones-label">按上海的区查看</span>
+    <div id="zones" class="zones"></div>
+  </div>
+  <div id="sel"><p class="sel-hint">点选省份、地区或上海的区（也可以直接点地图），对应的连线会被点亮，并在此列出全部道路。</p></div>
 </section>
 
 <section id="pattern" class="wrap">

@@ -71,7 +71,7 @@ const cnOut = provs.map((p) => {
 });
 const provCP = Object.fromEntries(provs.map((p) => [p.name, p.cp]));
 
-// ---------- Shanghai with fisheye ----------
+// ---------- Shanghai: centre-magnifying fisheye, and true proportions ----------
 const KX = Math.cos(31.2 * D) * 111.32, KY = 110.57;
 const C0 = [121.4760, 31.2320];          // 人民广场 (GCJ-02)
 const shDir = path.join(SRC, 'counties/package/src/直辖市/上海');
@@ -95,36 +95,43 @@ const densify = (ring, stepKm = 0.4) => {
   }
   return out;
 };
-let fx0 = Infinity, fx1 = -Infinity, fy0 = Infinity, fy1 = -Infinity;
-const shFish = shRaw.map((d) => ({ ...d, frings: d.rings.map((r) => densify(r).map(fish)) }));
-for (const d of shFish) for (const r of d.frings) for (const [x, y] of r) { fx0 = Math.min(fx0, x); fx1 = Math.max(fx1, x); fy0 = Math.min(fy0, y); fy1 = Math.max(fy1, y); }
-const SW = 760, SM = 22;
-const sS = (SW - 2 * SM) / (fx1 - fx0);
-const SH = Math.round((fy1 - fy0) * sS + 2 * SM);
-const toPlane = ([x, y]) => [SM + (x - fx0) * sS, SM + (y - fy0) * sS];
-const shPt = (ll) => toPlane(fish(ll));
-const shOut = shFish.map((d) => {
-  const rings = d.frings.map((r) => dp(r.map(toPlane), 0.55)).filter((r) => r.length >= 3 && Math.abs(area(r)) > 1.5);
-  let cp = d.cp;
-  if (!cp) { const big = d.rings.reduce((a, b) => Math.abs(area(a)) > Math.abs(area(b)) ? a : b); let A = 0, cx = 0, cy = 0; for (let i = 0; i < big.length; i++) { const [x1, y1] = big[i], [x2, y2] = big[(i + 1) % big.length], f = x1 * y2 - x2 * y1; A += f; cx += (x1 + x2) * f; cy += (y1 + y2) * f; } cp = [cx / (3 * A), cy / (3 * A)]; }
-  const [lx, ly] = shPt(cp);
-  return { n: d.n, d: ringsToPath(rings), lx: r1(lx), ly: r1(ly) };
-});
-// Huangpu River ≈ the edge 浦东 shares with the Puxi riverside districts
+const linear = ([lon, lat]) => [(lon - C0[0]) * KX, (C0[1] - lat) * KY];   // true proportions, km
+
+// Huangpu River ≈ the edge 浦东 shares with the Puxi riverside districts (computed once, in lon/lat)
 const segD = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1e-18; let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2; t = Math.max(0, Math.min(1, t)); return Math.hypot((a[0] + t * dx - p[0]) * KX, (a[1] + t * dy - p[1]) * KY); };
 const pd = shRaw.find((d) => d.n === '浦东新区');
 const riverSide = shRaw.filter((d) => ['黄浦区', '徐汇区', '杨浦区', '虹口区', '宝山区'].includes(d.n));
-const lines = []; let curL = [];
+const riverLines = []; let curL = [];
 for (const ring of pd.rings) {
   const dr = densify(ring, 0.2);
   for (let i = 0; i < dr.length; i++) {
     const a = dr[i];
     const near = riverSide.some((o) => o.rings.some((r) => { for (let j = 0; j < r.length; j++) if (segD(a, r[j], r[(j + 1) % r.length]) < 0.12) return true; return false; }));
-    if (near) curL.push(a); else if (curL.length) { lines.push(curL); curL = []; }
+    if (near) curL.push(a); else if (curL.length) { riverLines.push(curL); curL = []; }
   }
-  if (curL.length) { lines.push(curL); curL = []; }
+  if (curL.length) { riverLines.push(curL); curL = []; }
 }
-const riverPath = lines.filter((l) => l.length > 3).map((l) => 'M' + dp(l.map(shPt), 0.5).map(([x, y]) => r1(x) + ' ' + r1(y)).join('L')).join('');
+
+// Lay Shanghai out on a plane SW wide under a given projection (lon/lat -> km-ish units).
+const SW = 760, SM = 22;
+function shanghaiPlane(proj) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  const projected = shRaw.map((d) => ({ ...d, prings: d.rings.map((r) => densify(r).map(proj)) }));
+  for (const d of projected) for (const r of d.prings) for (const [x, y] of r) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const k = (SW - 2 * SM) / (x1 - x0);
+  const toPlane = ([x, y]) => [SM + (x - x0) * k, SM + (y - y0) * k];
+  const pt = (ll) => toPlane(proj(ll));
+  const shd = projected.map((d) => {
+    const rings = d.prings.map((r) => dp(r.map(toPlane), 0.55)).filter((r) => r.length >= 3 && Math.abs(area(r)) > 1.5);
+    let cp = d.cp;
+    if (!cp) { const big = d.rings.reduce((a, b) => Math.abs(area(a)) > Math.abs(area(b)) ? a : b); let A = 0, cx = 0, cy = 0; for (let i = 0; i < big.length; i++) { const [xa, ya] = big[i], [xb, yb] = big[(i + 1) % big.length], f = xa * yb - xb * ya; A += f; cx += (xa + xb) * f; cy += (ya + yb) * f; } cp = [cx / (3 * A), cy / (3 * A)]; }
+    const [lx, ly] = pt(cp);
+    return { n: d.n, d: ringsToPath(rings), lx: r1(lx), ly: r1(ly) };
+  });
+  const river = riverLines.filter((l) => l.length > 3).map((l) => 'M' + dp(l.map(pt), 0.5).map(([x, y]) => r1(x) + ' ' + r1(y)).join('L')).join('');
+  return { w: SW, h: Math.round((y1 - y0) * k + 2 * SM), shd, river, pt };
+}
+const FISH = shanghaiPlane(fish), LIN = shanghaiPlane(linear);
 
 // ---------- roads ----------
 const K = JSON.parse(fs.readFileSync(path.join(WORK, 'kept.json'), 'utf8'));
@@ -134,14 +141,15 @@ const roads = K.map((k) => {
   let ll = k.ll;
   if (OLD[k.base]) ll = OLD[k.base];
   else if (!ll) ll = provCP[k.prov];
-  const [cu, cv] = cnProj(ll), [su, sv] = shPt(k.pt);
-  return [k.name, k.base, k.prov, k.label, k.kind === 'P' ? 1 : 0, DS[k.district], r1(cu), r1(cv), r1(su), r1(sv)];
+  const [cu, cv] = cnProj(ll), [su, sv] = FISH.pt(k.pt), [lu, lv] = LIN.pt(k.pt);
+  return [k.name, k.base, k.prov, k.label, k.kind === 'P' ? 1 : 0, DS[k.district], r1(cu), r1(cv), r1(su), r1(sv), r1(lu), r1(lv)];
 }).sort((a, b) => a[0].localeCompare(b[0], 'zh'));
 const meta = JSON.parse(fs.readFileSync(path.join(WORK, 'meta.json'), 'utf8'));
 const revPath = path.join(WORK, 'reverse.json');
 if (fs.existsSync(revPath)) meta.reverse = JSON.parse(fs.readFileSync(revPath, 'utf8'));
 const OUT = path.join(ROOT, 'data', 'geo.json');
-const geo = { v: 2, cw: CW, ch: CH, sw: SW, sh: SH, cn: cnOut, nh: ringsToPath(nh.map((r) => r.map(cnProj))), shd: shOut, river: riverPath, roads, meta };
+// roads: [name, stem, province, place label, named-after-province, district, china u, v, fisheye u, v, linear u, v]
+const plane = ({ w, h, shd, river }) => ({ w, h, shd, river });
+const geo = { v: 3, cw: CW, ch: CH, cn: cnOut, nh: ringsToPath(nh.map((r) => r.map(cnProj))), fish: plane(FISH), lin: plane(LIN), roads, meta };
 fs.writeFileSync(OUT, JSON.stringify(geo));
-console.log('plane', SW, 'x', SH, 'RMAX km', RMAX.toFixed(1), 'roads', roads.length, 'bytes', fs.statSync(OUT).size);
-console.log('centre check: 黄浦 label', shOut.find((d) => d.n === '黄浦区').lx, shOut.find((d) => d.n === '黄浦区').ly, ' river chars', riverPath.length);
+console.log('fisheye plane', FISH.w, 'x', FISH.h, '| linear plane', LIN.w, 'x', LIN.h, '| RMAX km', RMAX.toFixed(1), '| roads', roads.length, '| bytes', fs.statSync(OUT).size);
