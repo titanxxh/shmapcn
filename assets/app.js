@@ -50,6 +50,10 @@
   };
 
   const state = { sel: null, az: DEFAULT_VIEW.az, el: DEFAULT_VIEW.el, q: '', open: {}, proj: 'fish' };
+  // 2D view inside the Shanghai board: zoom k around map point (cx, cy), in plane units
+  let zoom = { k: 1, cx: 0, cy: 0 };
+  let botMatrix = null;   // board -> SVG coordinates from the last render, for wheel / pan hit tests
+  const MAX_ZOOM = 40;
   let D = null;
 
   // ---------- helpers ----------
@@ -121,20 +125,29 @@
     const labelAt = (f) => { const c = f.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1])[0]; return [f1(Math.max(16, c[0])), f1(c[1] - 30), f1(c[1] - 12)]; };
     const sel = state.sel;
     const out = [];
+    const W = BOT.W, H = BOT.H, k = zoom.k;
+    // map plane -> board, after zooming; things outside the board are clipped or skipped
+    const zu = (u) => (u - zoom.cx) * k + W / 2, zv = (v) => (v - zoom.cy) * k + H / 2;
+    const inBoard = (u, v) => u >= -1 && u <= W + 1 && v >= -1 && v <= H + 1;
+    botMatrix = [sc * ca, sc * se * sa, -sc * sa, sc * se * ca,
+      ox + sc * (-ca * W / 2 + sa * H / 2), oy + sc * (se * (-sa * W / 2 - ca * H / 2) - zb * ce)];
 
     // bottom board: Shanghai
+    out.push(`<defs><clipPath id="board-clip"><rect x="0" y="0" width="${W}" height="${H}"/></clipPath></defs>`);
     out.push(`<polygon points="${pts(hull(botFace.concat(face(BOT, zb - SLAB))))}" fill="#060B15"/>`);
     out.push(`<polygon points="${pts(botFace)}" fill="#0F192C" stroke="#2A3C5E"/>`);
-    out.push(`<g transform="${mat(BOT, zb)}">`);
+    out.push(`<g transform="${mat(BOT, zb)}" clip-path="url(#board-clip)"><g transform="translate(${f1(W / 2)} ${f1(H / 2)}) scale(${k.toFixed(4)}) translate(${(-zoom.cx).toFixed(2)} ${(-zoom.cy).toFixed(2)})">`);
     const pickedZone = sel && sel.t === 'z' ? sel.id : null;
     const districts = plane.shd.slice().sort((a, b) => (shortZone(a.n) === pickedZone) - (shortZone(b.n) === pickedZone));
     for (const d of districts) {
       const z = shortZone(d.n), n = D.zoneCount[z] || 0, picked = z === pickedZone;
       out.push(`<path d="${d.d}" fill="${picked ? '#2C4673' : n ? '#1A2A47' : '#111C30'}" stroke="${picked ? '#EEF2F8' : '#2E4268'}" stroke-width="${picked ? 1.6 : 0.8}" vector-effect="non-scaling-stroke"${n ? ` data-zone="${z}" style="cursor:pointer"` : ''}><title>${esc(d.n + (n ? `：${n} 条，点击查看` : ''))}</title></path>`);
     }
-    out.push(`<path d="${plane.river}" fill="none" stroke="#1F5A93" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/></g>`);
+    out.push(`<path d="${plane.river}" fill="none" stroke="#1F5A93" stroke-width="${(5 / Math.sqrt(k)).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/></g></g>`);
     for (const d of plane.shd) {
-      const z = shortZone(d.n), [x, y] = pr(BOT, d.lx, d.ly, zb);
+      const z = shortZone(d.n), lu = zu(d.lx), lv = zv(d.ly);
+      if (!inBoard(lu, lv)) continue;
+      const [x, y] = pr(BOT, lu, lv, zb);
       const fill = z === pickedZone ? '#FFFFFF' : D.zoneCount[z] ? '#8E9CB4' : '#56647C';
       out.push(`<text class="lbl" x="${f1(x)}" y="${f1(y + 5)}" text-anchor="middle" fill="${fill}" style="font-size:12px;font-weight:700;letter-spacing:.12em">${esc(z)}</text>`);
     }
@@ -142,18 +155,24 @@
     // threads + dots
     const threads = [], rdots = [], cities = new Map(), botL = [];
     const cityLabels = !!sel && (sel.t === 'p' || sel.t === 'z');
-    const roadLabels = !!sel && sel.t === 'p';
+    // road names on the lower map: for a selected province, or once zoomed in far enough to read them
+    const visible = D.roads.filter((r) => inBoard(zu(lin ? r.lu : r.su), zv(lin ? r.lv : r.sv)));
+    const labelled = visible.filter((r) => !sel || roadOn(r));
+    const roadLabels = (!!sel && sel.t === 'p') || (k >= 2 && labelled.length <= 120);
+    const visibleSet = new Set(visible);
+    const dotR = k >= 3 ? 0.6 : 0;
     for (const r of D.roads) {
       const color = P[r.prov][2], on = roadOn(r), hi = !!sel && on;
       const [ax, ay] = pr(TOP, r.cu, r.cv, zt);
-      const [bx, by] = pr(BOT, lin ? r.lu : r.su, lin ? r.lv : r.sv, zb);
-      threads.push([hi, `<line x1="${f1(ax)}" y1="${f1(ay)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="${color}" stroke-opacity="${sel ? (on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}" stroke-linecap="round" pointer-events="none"/>`]);
-      rdots.push([hi, `<circle cx="${f1(bx)}" cy="${f1(by)}" r="${hi ? 3.4 : 2.3}" fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${on ? 1 : 0.2}" data-zone="${r.zone}" style="cursor:pointer"><title>${esc(r.name + ' → ' + (r.isP ? r.prov : r.label) + '（' + zoneFull(r.zone) + '）')}</title></circle>`]);
       // one dot per city; it is lit if any of its roads is
       const key = r.cu + ',' + r.cv;
       const c = cities.get(key) || { x: ax, y: ay, color, isP: r.isP, name: r.base, prov: r.prov, on: false, hi: false };
       c.on = c.on || on; c.hi = c.hi || hi;
       cities.set(key, c);
+      if (!visibleSet.has(r)) continue;   // zoomed away from this road
+      const [bx, by] = pr(BOT, zu(lin ? r.lu : r.su), zv(lin ? r.lv : r.sv), zb);
+      threads.push([hi, `<line x1="${f1(ax)}" y1="${f1(ay)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="${color}" stroke-opacity="${sel ? (on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}" stroke-linecap="round" pointer-events="none"/>`]);
+      rdots.push([hi, `<circle cx="${f1(bx)}" cy="${f1(by)}" r="${(hi ? 3.4 : 2.3) + dotR}" fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${on ? 1 : 0.2}" data-zone="${r.zone}" style="cursor:pointer"><title>${esc(r.name + ' → ' + (r.isP ? r.prov : r.label) + '（' + zoneFull(r.zone) + '）')}</title></circle>`]);
       if (roadLabels && on) botL.push(`<text class="lbl lbl-sel" x="${f1(bx + 5)}" y="${f1(by + 4)}" fill="#F4F6FA" style="font-size:10px;font-weight:500">${esc(r.name)}</text>`);
     }
     const ordered = (list) => list.filter((x) => !x[0]).concat(list.filter((x) => x[0])).map((x) => x[1]).join('');
@@ -197,11 +216,60 @@
     out.push(`<text x="${tx}" y="${ty}" fill="#F4F6FA" style="font-size:16px;font-weight:700;letter-spacing:.08em;pointer-events:none">上层 · 中国</text>`,
       `<text x="${tx}" y="${ty2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 被借用名字的城市、县</text>`,
       `<text x="${bx}" y="${by}" fill="#F4F6FA" style="font-size:16px;font-weight:700;letter-spacing:.08em;pointer-events:none">下层 · 上海</text>`,
-      `<text x="${bx}" y="${by2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 道路实际位置，${lin ? '真实比例' : '中心城区放大'} · 可点击各区</text>`);
+      `<text x="${bx}" y="${by2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 道路实际位置，${lin ? '真实比例' : '中心城区放大'} · 可点击各区、滚轮缩放</text>`);
     svg.innerHTML = out.join('');
     $('#az').value = state.az;
     $('#el').value = state.el;
     for (const b of $$('[data-act="proj"]')) b.setAttribute('aria-pressed', String(b.dataset.id === state.proj));
+    $('#zoom-level').textContent = k < 1.05 ? '全上海' : k.toFixed(1) + '×';
+  }
+
+  // ---------- zoom of the lower map ----------
+  const plane = () => (state.proj === 'lin' ? D.g.lin : D.g.fish);
+  function clampZoom() {
+    const { w, h } = plane();
+    zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k));
+    const hw = w / (2 * zoom.k), hh = h / (2 * zoom.k);
+    zoom.cx = Math.max(hw, Math.min(w - hw, zoom.cx));
+    zoom.cy = Math.max(hh, Math.min(h - hh, zoom.cy));
+  }
+  // frame the selected district (its outline) or the roads of the selected province / region
+  function fitZoom() {
+    const { w, h } = plane();
+    const sel = state.sel, lin = state.proj === 'lin';
+    let box = null;
+    if (sel && sel.t === 'z') box = D.zoneBox[state.proj][sel.id];
+    else if (sel) {
+      const ps = D.roads.filter(roadOn).map((r) => (lin ? [r.lu, r.lv] : [r.su, r.sv]));
+      if (ps.length) box = [Math.min(...ps.map((p) => p[0])), Math.min(...ps.map((p) => p[1])), Math.max(...ps.map((p) => p[0])), Math.max(...ps.map((p) => p[1]))];
+    }
+    if (!box) { zoom = { k: 1, cx: w / 2, cy: h / 2 }; return; }
+    const bw = Math.max(box[2] - box[0], w / 14), bh = Math.max(box[3] - box[1], h / 14);
+    zoom = { k: Math.min(w / (bw * 1.2), h / (bh * 1.2)), cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
+    clampZoom();
+  }
+  // client point -> board coordinates of the lower map (null when the view is edge-on)
+  function toBoard(clientX, clientY) {
+    if (!botMatrix) return null;
+    const svgEl = $('#scene'), ctm = svgEl.getScreenCTM();
+    if (!ctm) return null;
+    const pt = svgEl.createSVGPoint();
+    pt.x = clientX; pt.y = clientY;
+    const p = pt.matrixTransform(ctm.inverse());
+    const [a, b, c, d, e, f] = botMatrix, det = a * d - b * c;
+    if (Math.abs(det) < 1e-9) return null;
+    const x = p.x - e, y = p.y - f;
+    return { u: (d * x - c * y) / det, v: (-b * x + a * y) / det };
+  }
+  const onBoard = (bp) => { const { w, h } = plane(); return !!bp && bp.u >= 0 && bp.u <= w && bp.v >= 0 && bp.v <= h; };
+  function zoomAt(u, v, factor) {
+    const { w, h } = plane();
+    const mx = (u - w / 2) / zoom.k + zoom.cx, my = (v - h / 2) / zoom.k + zoom.cy;   // map point under the cursor stays put
+    zoom.k = Math.max(1, Math.min(MAX_ZOOM, zoom.k * factor));
+    zoom.cx = mx - (u - w / 2) / zoom.k;
+    zoom.cy = my - (v - h / 2) / zoom.k;
+    clampZoom();
+    queueScene();
   }
 
   let sceneQueued = false;
@@ -345,6 +413,7 @@
   function select(t, id) {
     const cur = state.sel;
     state.sel = cur && cur.t === t && cur.id === id ? null : { t, id };
+    fitZoom();
     renderAll();
   }
   function setView(az, el) {
@@ -360,8 +429,11 @@
     if (act === 'prov') select('p', id);
     else if (act === 'region') select('r', id);
     else if (act === 'zone') select('z', id);
-    else if (act === 'proj') { state.proj = id; renderScene(); }
-    else if (act === 'clear') { state.sel = null; renderAll(); }
+    else if (act === 'proj') { state.proj = id; fitZoom(); renderScene(); }
+    else if (act === 'zoomin') { const { w, h } = plane(); zoomAt(w / 2, h / 2, 1.6); }
+    else if (act === 'zoomout') { const { w, h } = plane(); zoomAt(w / 2, h / 2, 1 / 1.6); }
+    else if (act === 'zoomfit') { const { w, h } = plane(); zoom = { k: 1, cx: w / 2, cy: h / 2 }; queueScene(); }
+    else if (act === 'clear') { state.sel = null; fitZoom(); renderAll(); }
     else if (act === 'rotl') setView(state.az - 30, state.el);
     else if (act === 'rotr') setView(state.az + 30, state.el);
     else if (act === 'reset') setView(DEFAULT_VIEW.az, DEFAULT_VIEW.el);
@@ -374,7 +446,17 @@
   // drag to rotate; a short tap on a province or a district selects it
   const svg = $('#scene');
   let drag = null;
-  svg.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, az: state.az, el: state.el, moved: false }; });
+  // once the lower map is zoomed in, dragging on it pans instead
+  svg.addEventListener('pointerdown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, az: state.az, el: state.el, moved: false, pan: null };
+    if (D && zoom.k > 1.02) {
+      const bp = toBoard(e.clientX, e.clientY);
+      if (onBoard(bp)) {
+        const { w, h } = plane();
+        drag.pan = { mx: (bp.u - w / 2) / zoom.k + zoom.cx, my: (bp.v - h / 2) / zoom.k + zoom.cy };
+      }
+    }
+  });
   svg.addEventListener('pointermove', (e) => {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
@@ -384,8 +466,27 @@
       svg.classList.add('dragging');
       try { svg.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     }
-    setView(drag.az + dx * 0.35, drag.el - dy * 0.25);
+    if (drag.pan) {
+      const bp = toBoard(e.clientX, e.clientY);
+      if (!bp) return;
+      const { w, h } = plane();
+      zoom.cx = drag.pan.mx - (bp.u - w / 2) / zoom.k;
+      zoom.cy = drag.pan.my - (bp.v - h / 2) / zoom.k;
+      clampZoom();
+      queueScene();
+    } else {
+      setView(drag.az + dx * 0.35, drag.el - dy * 0.25);
+    }
   });
+  // the wheel zooms the lower map only while the pointer is over it, so the page still scrolls elsewhere
+  svg.addEventListener('wheel', (e) => {
+    if (!D) return;
+    const bp = toBoard(e.clientX, e.clientY);
+    if (!onBoard(bp)) return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+    zoomAt(bp.u, bp.v, Math.exp(-e.deltaY * unit * 0.0015));
+  }, { passive: false });
   const endDrag = (e) => {
     if (drag && !drag.moved && e.type === 'pointerup') {
       const t = e.target.closest && e.target.closest('[data-prov],[data-zone]');
@@ -409,7 +510,20 @@
         zoneCount[r.zone] = (zoneCount[r.zone] || 0) + 1;
         (zoneProv[r.zone] = zoneProv[r.zone] || {})[r.prov] = true;
       });
-      D = { g, roads, count, zoneCount, zoneProv };
+      // bounding box of every district outline in both projections, for framing a selected district
+      const zoneBox = { fish: {}, lin: {} };
+      for (const key of ['fish', 'lin']) {
+        for (const d of g[key].shd) {
+          const nums = d.d.match(/-?\d+(?:\.\d+)?/g).map(Number);
+          let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+          for (let i = 0; i + 1 < nums.length; i += 2) {
+            bx0 = Math.min(bx0, nums[i]); bx1 = Math.max(bx1, nums[i]); by0 = Math.min(by0, nums[i + 1]); by1 = Math.max(by1, nums[i + 1]);
+          }
+          zoneBox[key][shortZone(d.n)] = [bx0, by0, bx1, by1];
+        }
+      }
+      D = { g, roads, count, zoneCount, zoneProv, zoneBox };
+      zoom = { k: 1, cx: g.fish.w / 2, cy: g.fish.h / 2 };
       $('#scene-msg').hidden = true;
       svg.removeAttribute('hidden');
       renderStats();
