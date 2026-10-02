@@ -49,7 +49,7 @@
     cew: (r) => EW.includes(r.name),
   };
 
-  const state = { sel: null, az: DEFAULT_VIEW.az, el: DEFAULT_VIEW.el, q: '', open: {} };
+  const state = { sel: null, az: DEFAULT_VIEW.az, el: DEFAULT_VIEW.el, q: '', open: {}, proj: 'fish' };
   let D = null;
 
   // ---------- helpers ----------
@@ -62,7 +62,22 @@
   const zh = (a, b) => a.localeCompare(b, 'zh');
   const byProv = (a, b) => ORDER.indexOf(a.prov) - ORDER.indexOf(b.prov) || zh(a.name, b.name);
   const byZone = (a, b) => ZORDER.indexOf(a.zone) - ZORDER.indexOf(b.zone) || byProv(a, b);
-  const isOn = (prov) => !state.sel || (state.sel.t === 'p' ? prov === state.sel.id : P[prov] && P[prov][1] === state.sel.id);
+  // the current selection is a province ('p'), a region ('r') or a Shanghai district ('z')
+  const roadOn = (r) => {
+    const s = state.sel;
+    if (!s) return true;
+    if (s.t === 'p') return r.prov === s.id;
+    if (s.t === 'r') return P[r.prov][1] === s.id;
+    return r.zone === s.id;
+  };
+  const isOn = (prov) => {
+    const s = state.sel;
+    if (!s) return true;
+    if (s.t === 'p') return prov === s.id;
+    if (s.t === 'r') return !!P[prov] && P[prov][1] === s.id;
+    return !!(D.zoneProv[s.id] && D.zoneProv[s.id][prov]);
+  };
+  const zoneFull = (z) => (z === '浦东' ? '浦东新区' : z + '区');
   const pts = (ps) => ps.map(([x, y]) => f1(x) + ',' + f1(y)).join(' ');
 
   function hull(points) {
@@ -83,7 +98,8 @@
     const az = state.az * DEG, el = state.el * DEG;
     const ca = Math.cos(az), sa = Math.sin(az), se = Math.sin(el), ce = Math.cos(el);
     const zt = LAYER_GAP / 2, zb = -LAYER_GAP / 2;
-    const TOP = { W: g.cw, H: g.ch }, BOT = { W: g.sw, H: g.sh };
+    const lin = state.proj === 'lin', plane = lin ? g.lin : g.fish;
+    const TOP = { W: g.cw, H: g.ch }, BOT = { W: plane.w, H: plane.h };
     // plane point (u, v) at height z -> view coordinates
     const raw = (L, u, v, z) => { const x = u - L.W / 2, y = v - L.H / 2; return [ca * x - sa * y, se * (sa * x + ca * y) - z * ce]; };
     const corners = (L) => [[0, 0], [L.W, 0], [L.W, L.H], [0, L.H]];
@@ -110,71 +126,82 @@
     out.push(`<polygon points="${pts(hull(botFace.concat(face(BOT, zb - SLAB))))}" fill="#060B15"/>`);
     out.push(`<polygon points="${pts(botFace)}" fill="#0F192C" stroke="#2A3C5E"/>`);
     out.push(`<g transform="${mat(BOT, zb)}">`);
-    for (const d of g.shd) out.push(`<path d="${d.d}" fill="${D.zoneCount[shortZone(d.n)] ? '#1A2A47' : '#111C30'}" stroke="#2E4268" stroke-width="0.8" vector-effect="non-scaling-stroke"/>`);
-    out.push(`<path d="${g.river}" fill="none" stroke="#1F5A93" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>`);
-    for (const d of g.shd) {
-      const [x, y] = pr(BOT, d.lx, d.ly, zb);
-      out.push(`<text x="${f1(x)}" y="${f1(y + 5)}" text-anchor="middle" fill="${D.zoneCount[shortZone(d.n)] ? '#8E9CB4' : '#56647C'}" style="font-size:12px;font-weight:700;letter-spacing:.12em;pointer-events:none">${esc(shortZone(d.n))}</text>`);
+    const pickedZone = sel && sel.t === 'z' ? sel.id : null;
+    const districts = plane.shd.slice().sort((a, b) => (shortZone(a.n) === pickedZone) - (shortZone(b.n) === pickedZone));
+    for (const d of districts) {
+      const z = shortZone(d.n), n = D.zoneCount[z] || 0, picked = z === pickedZone;
+      out.push(`<path d="${d.d}" fill="${picked ? '#2C4673' : n ? '#1A2A47' : '#111C30'}" stroke="${picked ? '#EEF2F8' : '#2E4268'}" stroke-width="${picked ? 1.6 : 0.8}" vector-effect="non-scaling-stroke"${n ? ` data-zone="${z}" style="cursor:pointer"` : ''}><title>${esc(d.n + (n ? `：${n} 条，点击查看` : ''))}</title></path>`);
+    }
+    out.push(`<path d="${plane.river}" fill="none" stroke="#1F5A93" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/></g>`);
+    for (const d of plane.shd) {
+      const z = shortZone(d.n), [x, y] = pr(BOT, d.lx, d.ly, zb);
+      const fill = z === pickedZone ? '#FFFFFF' : D.zoneCount[z] ? '#8E9CB4' : '#56647C';
+      out.push(`<text class="lbl" x="${f1(x)}" y="${f1(y + 5)}" text-anchor="middle" fill="${fill}" style="font-size:12px;font-weight:700;letter-spacing:.12em">${esc(z)}</text>`);
     }
 
     // threads + dots
-    const threads = [], rdots = [], cdots = new Map(), topL = [], botL = [];
-    const labels = !!sel && sel.t === 'p';
+    const threads = [], rdots = [], cities = new Map(), botL = [];
+    const cityLabels = !!sel && (sel.t === 'p' || sel.t === 'z');
+    const roadLabels = !!sel && sel.t === 'p';
     for (const r of D.roads) {
-      const color = P[r.prov][2], on = isOn(r.prov), hi = !!sel && on;
+      const color = P[r.prov][2], on = roadOn(r), hi = !!sel && on;
       const [ax, ay] = pr(TOP, r.cu, r.cv, zt);
-      const [bx, by] = pr(BOT, r.su, r.sv, zb);
-      threads.push([hi, `<line x1="${f1(ax)}" y1="${f1(ay)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="${color}" stroke-opacity="${sel ? (on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}" stroke-linecap="round"/>`]);
-      rdots.push([hi, `<circle cx="${f1(bx)}" cy="${f1(by)}" r="${hi ? 3.4 : 2.3}" fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${on ? 1 : 0.2}"><title>${esc(r.name + ' → ' + (r.isP ? r.prov : r.label))}</title></circle>`]);
+      const [bx, by] = pr(BOT, lin ? r.lu : r.su, lin ? r.lv : r.sv, zb);
+      threads.push([hi, `<line x1="${f1(ax)}" y1="${f1(ay)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="${color}" stroke-opacity="${sel ? (on ? 0.85 : 0.03) : THREAD_OPACITY}" stroke-width="${hi ? 1.3 : 0.7}" stroke-linecap="round" pointer-events="none"/>`]);
+      rdots.push([hi, `<circle cx="${f1(bx)}" cy="${f1(by)}" r="${hi ? 3.4 : 2.3}" fill="${r.isP ? INK : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.3 : 0.6}" opacity="${on ? 1 : 0.2}" data-zone="${r.zone}" style="cursor:pointer"><title>${esc(r.name + ' → ' + (r.isP ? r.prov : r.label) + '（' + zoneFull(r.zone) + '）')}</title></circle>`]);
+      // one dot per city; it is lit if any of its roads is
       const key = r.cu + ',' + r.cv;
-      if (!cdots.has(key)) cdots.set(key, [hi, `<circle cx="${f1(ax)}" cy="${f1(ay)}" r="${hi ? 3.6 : 2.4}" fill="${r.isP ? 'none' : color}" stroke="${r.isP ? color : INK}" stroke-width="${r.isP ? 1.5 : 0.7}" opacity="${on ? 1 : 0.2}"/>`]);
-      if (labels && on) {
-        botL.push(`<text class="lbl lbl-sel" x="${f1(bx + 5)}" y="${f1(by + 4)}" fill="#F4F6FA" style="font-size:10px;font-weight:500">${esc(r.name)}</text>`);
-        if (!r.isP && !cdots.get(key).labelled) {
-          cdots.get(key).labelled = true;
-          topL.push(`<text class="lbl lbl-sel" x="${f1(ax + 6)}" y="${f1(ay - 6)}" fill="#F4F6FA" style="font-size:11px;font-weight:700">${esc(r.base)}</text>`);
-        }
-      }
+      const c = cities.get(key) || { x: ax, y: ay, color, isP: r.isP, name: r.base, prov: r.prov, on: false, hi: false };
+      c.on = c.on || on; c.hi = c.hi || hi;
+      cities.set(key, c);
+      if (roadLabels && on) botL.push(`<text class="lbl lbl-sel" x="${f1(bx + 5)}" y="${f1(by + 4)}" fill="#F4F6FA" style="font-size:10px;font-weight:500">${esc(r.name)}</text>`);
     }
     const ordered = (list) => list.filter((x) => !x[0]).concat(list.filter((x) => x[0])).map((x) => x[1]).join('');
+    const cdots = [], topL = [];
+    for (const c of cities.values()) {
+      cdots.push([c.hi, `<circle cx="${f1(c.x)}" cy="${f1(c.y)}" r="${c.hi ? 3.6 : 2.4}" fill="${c.isP ? 'none' : c.color}" stroke="${c.isP ? c.color : INK}" stroke-width="${c.isP ? 1.5 : 0.7}" opacity="${c.on ? 1 : 0.2}" data-prov="${c.prov}" style="cursor:pointer"><title>${esc(c.isP ? c.prov : c.name + '（' + c.prov + '）')}</title></circle>`]);
+      if (cityLabels && c.hi && !c.isP) topL.push(`<text class="lbl lbl-sel" x="${f1(c.x + 6)}" y="${f1(c.y - 6)}" fill="#F4F6FA" style="font-size:11px;font-weight:700">${esc(c.name)}</text>`);
+    }
     out.push(ordered(rdots));
     const sh = g.cn.find((p) => p.n === '上海');
     if (sh) {
       const [sx, sy] = pr(TOP, sh.lx, sh.ly, zt);
-      for (const [bx, by] of botFace) out.push(`<line x1="${f1(sx)}" y1="${f1(sy)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="#EEF2F8" stroke-opacity="0.18" stroke-dasharray="3 6"/>`);
+      for (const [bx, by] of botFace) out.push(`<line x1="${f1(sx)}" y1="${f1(sy)}" x2="${f1(bx)}" y2="${f1(by)}" stroke="#EEF2F8" stroke-opacity="0.18" stroke-dasharray="3 6" pointer-events="none"/>`);
     }
     out.push(ordered(threads));
 
     // top layer: China, a glassy plate with an extruded map
-    out.push(`<polygon points="${pts(topFace)}" fill="#7F9CCB" fill-opacity="0.05" stroke="#3A4F78" stroke-opacity="0.8"/>`);
-    out.push(`<g transform="translate(0 ${f1(sc * 9 * ce)})"><g transform="${mat(TOP, zt)}" opacity="0.6">`);
+    // only the provinces themselves take clicks, so the lower map stays clickable where the layers overlap
+    out.push(`<polygon points="${pts(topFace)}" fill="#7F9CCB" fill-opacity="0.05" stroke="#3A4F78" stroke-opacity="0.8" pointer-events="none"/>`);
+    out.push(`<g transform="translate(0 ${f1(sc * 9 * ce)})" pointer-events="none"><g transform="${mat(TOP, zt)}" opacity="0.6">`);
     for (const p of g.cn) out.push(`<path d="${p.d}" fill="#040812"/>`);
     out.push(`</g></g><g transform="${mat(TOP, zt)}">`);
     for (const p of g.cn) {
-      const has = !!(P[p.n] && D.count[p.n]);
+      const has = !!(P[p.n] && D.count[p.n]);  // provinces without roads let clicks through to the map below
       let fill = '#1C2A44', op = 0.75;
       if (p.n === '上海') { fill = '#EEF2F8'; op = 0.95; }
       else if (has) { fill = P[p.n][2]; op = sel ? (isOn(p.n) ? 0.62 : 0.08) : 0.3; }
-      out.push(`<path d="${p.d}" fill="${fill}" fill-opacity="${op}" stroke="#9FB2D2" stroke-opacity="0.4" stroke-width="0.6" vector-effect="non-scaling-stroke"${has ? ` data-prov="${p.n}" style="cursor:pointer"` : ''}><title>${esc(p.n + (has ? `：${D.count[p.n]} 条` : ''))}</title></path>`);
+      out.push(`<path d="${p.d}" fill="${fill}" fill-opacity="${op}" stroke="#9FB2D2" stroke-opacity="0.4" stroke-width="0.6" vector-effect="non-scaling-stroke"${has ? ` data-prov="${p.n}" style="cursor:pointer"` : ' pointer-events="none"'}><title>${esc(p.n + (has ? `：${D.count[p.n]} 条` : ''))}</title></path>`);
     }
-    out.push(`<path d="${g.nh}" fill="#9FB2D2" fill-opacity="0.45"/></g>`);
+    out.push(`<path d="${g.nh}" fill="#9FB2D2" fill-opacity="0.45" pointer-events="none"/></g>`);
     for (const p of g.cn) {
       if (!D.count[p.n] && p.n !== '上海') continue;
       const [x, y] = pr(TOP, p.lx, p.ly, zt);
       const on = p.n === '上海' || isOn(p.n);
       out.push(`<text class="lbl" x="${f1(x)}" y="${f1(y + 14)}" text-anchor="middle" fill="${p.n === '上海' ? '#FFFFFF' : '#DCE3EE'}" opacity="${on ? 0.9 : 0.25}" style="font-size:11px;font-weight:700">${esc(p.n)}</text>`);
     }
-    out.push(ordered(Array.from(cdots.values())));
+    out.push(ordered(cdots));
     out.push(topL.join(''), botL.join(''));
 
     const [tx, ty, ty2] = labelAt(topFace), [bx, by, by2] = labelAt(botFace);
     out.push(`<text x="${tx}" y="${ty}" fill="#F4F6FA" style="font-size:16px;font-weight:700;letter-spacing:.08em;pointer-events:none">上层 · 中国</text>`,
       `<text x="${tx}" y="${ty2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 被借用名字的城市、县</text>`,
       `<text x="${bx}" y="${by}" fill="#F4F6FA" style="font-size:16px;font-weight:700;letter-spacing:.08em;pointer-events:none">下层 · 上海</text>`,
-      `<text x="${bx}" y="${by2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 道路实际位置，中心城区放大</text>`);
+      `<text x="${bx}" y="${by2}" fill="#93A1B8" style="font-size:12px;pointer-events:none">点 = 道路实际位置，${lin ? '真实比例' : '中心城区放大'} · 可点击各区</text>`);
     svg.innerHTML = out.join('');
     $('#az').value = state.az;
     $('#el').value = state.el;
+    for (const b of $$('[data-act="proj"]')) b.setAttribute('aria-pressed', String(b.dataset.id === state.proj));
   }
 
   let sceneQueued = false;
@@ -203,32 +230,45 @@
     }).join('');
   }
 
+  // ---------- Shanghai districts ----------
+  function renderZones() {
+    const sel = state.sel;
+    $('#zones').innerHTML = ZORDER.filter((z) => D.zoneCount[z]).map((z) => {
+      const on = !!sel && sel.t === 'z' && sel.id === z;
+      return `<button type="button" class="zone-btn" data-act="zone" data-id="${z}" aria-pressed="${on}">${z}<span class="n">${D.zoneCount[z]}</span></button>`;
+    }).join('');
+  }
+
   // ---------- selection detail ----------
   function renderSel() {
     const sel = state.sel;
     if (!sel) {
-      $('#sel').innerHTML = '<p class="sel-hint">点选上方的省份或地区，地图中对应的连线会被点亮，并在此列出全部道路。</p>';
+      $('#sel').innerHTML = '<p class="sel-hint">点选省份、地区或上海的区（也可以直接点地图），对应的连线会被点亮，并在此列出全部道路。</p>';
       return;
     }
-    const isP = sel.t === 'p';
+    const isP = sel.t === 'p', isZ = sel.t === 'z';
     const reg = REGIONS.find((x) => x[0] === sel.id);
-    const color = isP ? P[sel.id][2] : reg[2];
-    const list = D.roads.filter((r) => isOn(r.prov)).sort(byZone);
-    const zc = {};
-    list.forEach((r) => { zc[r.zone] = (zc[r.zone] || 0) + 1; });
-    const zs = Object.keys(zc).sort((a, b) => zc[b] - zc[a]).map((z) => z + ' ' + zc[z]).join(' · ');
-    const title = isP ? sel.id : (sel.id === '港澳台' ? '港澳台' : sel.id + '地区');
+    const color = isP ? P[sel.id][2] : isZ ? '#EEF2F8' : reg[2];
+    const list = D.roads.filter(roadOn).sort(isZ ? byProv : byZone);
+    const tally = {};
+    list.forEach((r) => { const k = isZ ? r.prov : r.zone; tally[k] = (tally[k] || 0) + 1; });
+    const keys = Object.keys(tally).sort((a, b) => tally[b] - tally[a]);
+    const parts = keys.slice(0, 10).map((k) => k + ' ' + tally[k]).join(' · ') + (keys.length > 10 ? ' …' : '');
+    const summary = isZ ? `共 ${list.length} 条，来自 ${keys.length} 个省级行政区：${parts}` : `共 ${list.length} 条，分布于 ${parts}`;
+    const title = isP ? sel.id : isZ ? zoneFull(sel.id) : (sel.id === '港澳台' ? '港澳台' : sel.id + '地区');
+    const badge = isP ? P[sel.id][0] : sel.id;
+    const kicker = isP ? P[sel.id][1] + ' · 省级行政区' : isZ ? '上海 · 区' : '地区';
     $('#sel').innerHTML = `<div class="sel" style="border-color:${color}">
       <div class="sel-head">
-        <span class="sel-badge" style="background:${color};font-size:${isP ? 22 : (sel.id.length > 2 ? 13 : 16)}px">${isP ? P[sel.id][0] : sel.id}</span>
-        <div class="sel-title"><small>${isP ? P[sel.id][1] + ' · 省级行政区' : '地区'}</small><b>${title}</b></div>
-        <span class="sel-summary">共 ${list.length} 条，分布于 ${zs}</span>
+        <span class="sel-badge" style="background:${color};font-size:${isP ? 22 : (badge.length > 2 ? 13 : 16)}px">${badge}</span>
+        <div class="sel-title"><small>${kicker}</small><b>${title}</b></div>
+        <span class="sel-summary">${summary}</span>
         <button type="button" class="close-btn" data-act="clear" aria-label="清除筛选">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>
       </div>
       <div class="selgrid">${list.map((r) => {
         const place = r.isP ? r.prov + '（省名）' : r.label;
-        return `<div class="sel-row" title="${esc(place)}"><span class="dot" style="background:${P[r.prov][2]}"></span><b>${esc(r.name)}</b><span class="arrow">→</span><span class="place">${esc(place)}</span><span class="zone">${r.zone}</span></div>`;
+        return `<div class="sel-row" title="${esc(place)}"><span class="dot" style="background:${P[r.prov][2]}"></span><b>${esc(r.name)}</b><span class="arrow">→</span><span class="place">${esc(place)}</span><span class="zone">${isZ ? r.prov : r.zone}</span></div>`;
       }).join('')}</div></div>`;
   }
 
@@ -238,7 +278,7 @@
     const tip = r.isP ? `${r.name}：以${r.prov}命名` : `${r.name} → ${r.label}（${r.prov}）`;
     const style = r.isP ? `border-color:${color};color:${color};background:transparent` : `border-color:${color};color:${INK};background:${color}`;
     const badge = r.isP ? `background:${color};color:${INK}` : `background:rgba(11,19,34,.82);color:${color}`;
-    return `<span class="chip" title="${esc(tip)}" style="${style};opacity:${isOn(r.prov) ? 1 : 0.16}"><i style="${badge}">${abbr}</i>${esc(r.name)}</span>`;
+    return `<span class="chip" title="${esc(tip)}" style="${style};opacity:${roadOn(r) ? 1 : 0.16}"><i style="${badge}">${abbr}</i>${esc(r.name)}</span>`;
   }
   function renderPatterns() {
     for (const [key, fn] of Object.entries(PATTERNS)) {
@@ -257,8 +297,10 @@
     for (const p of ORDER) {
       if (!D.count[p] || !isOn(p)) continue;
       const groups = new Map();
+      let n = 0;
       for (const r of D.roads) {
-        if (r.prov !== p) continue;
+        if (r.prov !== p || !roadOn(r)) continue;
+        n++;
         const k = r.isP ? '__P' : r.base;
         if (!groups.has(k)) groups.set(k, { place: r.isP ? p + '（省名）' : r.label, names: [], zones: [], hay: p + r.label + r.base });
         const gr = groups.get(k);
@@ -275,7 +317,7 @@
       const vis = expanded ? rows : rows.slice(0, ROWS_COLLAPSED);
       const more = !q && !state.sel && rows.length > ROWS_COLLAPSED
         ? `<button type="button" class="more-btn" data-act="toggle" data-id="${p}">${state.open[p] ? '收起' : `展开全部 ${rows.length} 个地名`}</button>` : '';
-      cards.push(`<article class="dir-card"><header><span class="badge" style="background:${P[p][2]}">${P[p][0]}</span><b>${p}</b><span>${D.count[p]} 条</span></header>
+      cards.push(`<article class="dir-card"><header><span class="badge" style="background:${P[p][2]}">${P[p][0]}</span><b>${p}</b><span>${n} 条</span></header>
         ${vis.map((x) => `<div class="dir-row"><b>${esc(x.place)}</b><span>${esc(x.names.join('、'))} <em>· ${esc(x.zones.join('、'))}</em></span></div>`).join('')}${more}</article>`);
     }
     $('#dir').innerHTML = cards.join('');
@@ -296,7 +338,7 @@
   }
 
   function renderAll() {
-    renderScene(); renderLegend(); renderSel(); renderPatterns(); renderDir();
+    renderScene(); renderLegend(); renderZones(); renderSel(); renderPatterns(); renderDir();
   }
 
   // ---------- events ----------
@@ -317,6 +359,8 @@
     const { act, id } = btn.dataset;
     if (act === 'prov') select('p', id);
     else if (act === 'region') select('r', id);
+    else if (act === 'zone') select('z', id);
+    else if (act === 'proj') { state.proj = id; renderScene(); }
     else if (act === 'clear') { state.sel = null; renderAll(); }
     else if (act === 'rotl') setView(state.az - 30, state.el);
     else if (act === 'rotr') setView(state.az + 30, state.el);
@@ -327,7 +371,7 @@
   $('#el').addEventListener('input', (e) => setView(state.az, Number(e.target.value)));
   $('#q').addEventListener('input', (e) => { state.q = e.target.value; if (D) renderDir(); });
 
-  // drag to rotate; a short tap on a province selects it
+  // drag to rotate; a short tap on a province or a district selects it
   const svg = $('#scene');
   let drag = null;
   svg.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, az: state.az, el: state.el, moved: false }; });
@@ -344,8 +388,8 @@
   });
   const endDrag = (e) => {
     if (drag && !drag.moved && e.type === 'pointerup') {
-      const t = e.target.closest && e.target.closest('[data-prov]');
-      if (t) select('p', t.dataset.prov);
+      const t = e.target.closest && e.target.closest('[data-prov],[data-zone]');
+      if (t) select(t.dataset.prov ? 'p' : 'z', t.dataset.prov || t.dataset.zone);
     }
     drag = null;
     svg.classList.remove('dragging');
@@ -357,11 +401,15 @@
   fetch('data/geo.json')
     .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then((g) => {
-      const roads = g.roads.filter((x) => P[x[2]]).map(([name, base, prov, label, isP, zone, cu, cv, su, sv]) =>
-        ({ name, base, prov, label, isP: !!isP && !CITY_LEVEL.includes(prov), zone, cu, cv, su, sv }));
-      const count = {}, zoneCount = {};
-      roads.forEach((r) => { count[r.prov] = (count[r.prov] || 0) + 1; zoneCount[r.zone] = (zoneCount[r.zone] || 0) + 1; });
-      D = { g, roads, count, zoneCount };
+      const roads = g.roads.filter((x) => P[x[2]]).map(([name, base, prov, label, isP, zone, cu, cv, su, sv, lu, lv]) =>
+        ({ name, base, prov, label, isP: !!isP && !CITY_LEVEL.includes(prov), zone, cu, cv, su, sv, lu, lv }));
+      const count = {}, zoneCount = {}, zoneProv = {};
+      roads.forEach((r) => {
+        count[r.prov] = (count[r.prov] || 0) + 1;
+        zoneCount[r.zone] = (zoneCount[r.zone] || 0) + 1;
+        (zoneProv[r.zone] = zoneProv[r.zone] || {})[r.prov] = true;
+      });
+      D = { g, roads, count, zoneCount, zoneProv };
       $('#scene-msg').hidden = true;
       svg.removeAttribute('hidden');
       renderStats();
