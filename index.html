@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>上海路名里的中国</title>
+<meta name="description" content="上海有 800 多个路名取自全国各地的城市与县份。双层三维地图：上层是中国，下层是上海，彩色细线把城市连到以它命名的道路。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;900&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='7' fill='%230B1322' stroke='%23EEF2F8' stroke-width='2' stroke-dasharray='4 3'/%3E%3Ctext x='16' y='22' font-size='15' text-anchor='middle' fill='%23EEF2F8'%3E%E6%B2%AA%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<div id="top">
+
+<nav class="wrap nav" aria-label="页面导航">
+  <a class="brand" href="#top"><span class="brand-mark">沪</span><span>路名地理</span></a>
+  <div class="nav-links">
+    <a href="#map">双层地图</a>
+    <a href="#pattern">方位规律</a>
+    <a href="#table">对照表</a>
+  </div>
+</nav>
+
+<header class="wrap hero">
+  <div>
+    <div class="hero-kicker">SHANGHAI · 路名地理</div>
+    <h1>上海路名<br>里的中国</h1>
+  </div>
+  <div>
+    <p>走在上海，几乎每个路口都通向另一座城市。十九世纪六十年代，租界当局定下“南北向道路用省名、东西向道路用城市名”的规则；二十世纪四十年代租界收回后，大批外国路名改为中国地名，新辟道路也延续这一传统，并大致依照各地在全国地图上的方位排布。我们把上海全部路名与全国省、地、县三级地名逐一比对，结果如下。</p>
+    <div class="stats">
+      <div class="stat"><b data-stat="checked">—</b><span>个路名逐一比对</span></div>
+      <div class="stat"><b data-stat="kept">—</b><span>个路名取自外地</span></div>
+      <div class="stat"><b data-stat="places">—</b><span>个城市与县份</span></div>
+      <div class="stat"><b data-stat="provs">—</b><span>个省级行政区</span></div>
+    </div>
+  </div>
+</header>
+
+<section id="map" class="wrap" style="padding-top: 24px">
+  <div class="section-head">
+    <div>
+      <div class="kicker">01 · 双层地图</div>
+      <h2>城市在上，道路在下</h2>
+    </div>
+    <p>上层是全国地图，每个光点是一座被借用了名字的城市或县；下层是全上海，每个点是一条道路的实际位置，中心城区做了放大。细线把城市连到以它命名的道路，颜色区分省份，空心点为以省名命名的道路。</p>
+  </div>
+
+  <div class="scene">
+    <div id="scene-msg" class="scene-msg">地图数据加载中…</div>
+    <svg id="scene" viewBox="0 0 1200 940" role="img" aria-label="双层三维地图：上层为中国，下层为上海，彩色细线连接城市与以其命名的道路" hidden></svg>
+    <div class="controls">
+      <div class="group">
+        <button type="button" class="icon-btn" data-act="rotl" aria-label="向左旋转">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg>
+        </button>
+        <button type="button" class="icon-btn" data-act="rotr" aria-label="向右旋转">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+        </button>
+        <button type="button" class="text-btn" data-act="reset">复位视角</button>
+      </div>
+      <label>旋转 <input id="az" type="range" min="-180" max="180" step="1" value="-24"></label>
+      <label>俯仰 <input id="el" type="range" min="15" max="75" step="1" value="30"></label>
+      <span class="hint">拖动画面旋转 · 点击省份查看对应道路</span>
+    </div>
+  </div>
+
+  <div id="legend" class="legend"></div>
+  <div id="sel"><p class="sel-hint">点选上方的省份或地区，地图中对应的连线会被点亮，并在此列出全部道路。</p></div>
+</section>
+
+<section id="pattern" class="wrap">
+  <div class="section-head">
+    <div>
+      <div class="kicker">02 · 方位规律</div>
+      <h2>城市里的版图</h2>
+    </div>
+  </div>
+  <div class="pat">
+    <article class="card">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i></i><i></i><i style="background:#6AA6FF"></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="card-title"><small>城东北 ← 东北三省</small><h3>杨浦、宝山里的关东</h3></div>
+        <div class="card-count"><b style="color:#6AA6FF" data-count="ne">—</b><span>条</span></div>
+      </div>
+      <p>辽宁、吉林、黑龙江的地名大多落在城市东北角：杨浦有大连、鞍山、抚顺、齐齐哈尔、延吉、图们，宝山有牡丹江、呼兰、富锦、漠河、密山。在地图上，它们与家乡处在同一个方位。</p>
+      <div class="chips" data-chips="ne"></div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i style="background:#E0952E"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="card-title"><small>城西北 ← 山西、陕西</small><h3>闸北、普陀的黄土高原</h3></div>
+        <div class="card-count"><b style="color:#E0952E" data-count="nw">—</b><span>条</span></div>
+      </div>
+      <p>原闸北的大宁一带几乎是一张山西县名表：临汾、灵石、闻喜、永和、万荣、汾西、平陆；往西到普陀，又接上陕西的延长、洛川、志丹、宜川、铜川、岚皋、石泉。</p>
+      <div class="chips" data-chips="nw"></div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i style="background:#F26BAE"></i><i></i><i></i></div>
+        <div class="card-title"><small>城西南 ← 广西、贵州</small><h3>徐汇的广西，长宁的贵州</h3></div>
+        <div class="card-count"><b style="color:#F26BAE" data-count="sw">—</b><span>条</span></div>
+      </div>
+      <p>徐汇西南的田林、漕河泾一带，钦州、柳州、桂林、田林、百色、桂平依次排开；长宁西部则聚集着遵义、安顺、水城、威宁、兴义、剑河等贵州地名。</p>
+      <div class="chips" data-chips="sw"></div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i style="background:#EE6B58"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="card-title"><small>嘉定 ← 新疆、甘肃</small><h3>上海西北角的西域</h3></div>
+        <div class="card-count"><b style="color:#EE6B58" data-count="jd">—</b><span>条</span></div>
+      </div>
+      <p>这条规律一直延伸到郊区。嘉定集中了新疆与甘肃的地名：塔城、博乐、伊宁、阿克苏、于田、墨玉、民丰，以及嘉峪关、张掖、临夏、陇南。上海的西北郊，对上了中国的西北。</p>
+      <div class="chips" data-chips="jd"></div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i style="background:#DDE88A"></i><i></i></div>
+        <div class="card-title"><small>闵行 ← 云南</small><h3>闵行的彩云之南</h3></div>
+        <div class="card-count"><b style="color:#DDE88A" data-count="mh">—</b><span>条</span></div>
+      </div>
+      <p>闵行有一大片云南地名：景洪、瑞丽、腾冲、普洱、临沧、德宏、澜沧、元江、鹤庆、剑川，几乎覆盖了云南的各个州市。</p>
+      <div class="chips" data-chips="mh"></div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i style="background:#F26BAE"></i><i></i><i></i></div>
+        <div class="card-title"><small>金山 ← 广西</small><h3>金山石化的八桂地名</h3></div>
+        <div class="card-count"><b style="color:#F26BAE" data-count="js">—</b><span>条</span></div>
+      </div>
+      <p>在上海最西南的金山石化一带，又集中出现了一批广西县名：龙胜、临桂、荔浦、蒙山、象州、柳城、隆安、合浦。</p>
+      <div class="chips" data-chips="js"></div>
+    </article>
+    <article class="card wide">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i style="background:#3ED68F"></i><i></i><i></i><i></i></div>
+        <div class="card-title"><small>浦东 ← 山东</small><h3>黄浦江对岸的山东</h3></div>
+        <div class="card-count"><b style="color:#3ED68F" data-count="e">—</b><span>条</span></div>
+      </div>
+      <p>浦东沿江的老城区里，山东地名成片出现：陆家嘴、潍坊一带有潍坊、即墨、乳山、福山、栖霞、莱阳，往南有临沂、德州、济阳、长清、枣庄、菏泽。</p>
+      <div class="chips" data-chips="e"></div>
+    </article>
+    <article class="card wide">
+      <div class="card-head">
+        <div class="compass" aria-hidden="true"><i></i><i></i><i></i><i></i><i style="background:#EEF2F8"></i><i></i><i></i><i></i><i></i></div>
+        <div class="card-title"><small>市中心 ← 全国</small><h3>外滩背后的经纬线</h3></div>
+        <div class="card-count"><b style="color:#EEF2F8" data-count="cns">—</b><span>条省名路</span></div>
+      </div>
+      <p>从外滩到人民广场，南北向的道路多以省份命名，东西向的道路多以城市命名，四川路、江西路、河南路与北京路、南京路、九江路、汉口路、福州路纵横交织。广东路是少有的例外，以省名命名却东西走向。</p>
+      <div class="chip-label">南北向 · 省名</div>
+      <div class="chips" data-chips="cns"></div>
+      <div class="chip-label">东西向 · 城市名</div>
+      <div class="chips" data-chips="cew"></div>
+    </article>
+  </div>
+</section>
+
+<section id="table" class="wrap">
+  <div class="section-head">
+    <div>
+      <div class="kicker">03 · 对照表</div>
+      <h2>道路与城市，逐一对照</h2>
+    </div>
+    <label class="search">搜索路名或地名
+      <input id="q" type="search" placeholder="如：钦州、南京路、齐齐哈尔" autocomplete="off">
+    </label>
+  </div>
+  <p id="dir-summary" class="dir-summary">数据加载中…</p>
+  <div id="dir" class="dir"></div>
+</section>
+
+<footer class="wrap">
+  <div class="foot">
+    <p>数据与方法：道路名称取自 Overture Maps（源自 OpenStreetMap，2026 年 9 月版），共 <span data-stat="checked">—</span> 个以“路、街、大道”结尾的路名（公路、高速等城际道路不计）。我们把每个路名去掉东西南北中、数字和“路”字等后缀，与全国省、地、县三级行政区名称（含金陵、汉口、腾越等少量旧称）逐一比对，得到 <span data-stat="candidates">—</span> 个候选；再排除常见词、上海本地地名和山河湖海，对“永安”“长兴”这类吉祥字眼，只在中心城区或同省地名成片出现处计入，最终收录 <span data-stat="kept">—</span> 个路名。</p>
+    <p>反向核对：再以全国 <span data-stat="revCity">—</span> 个地级行政区和 <span data-stat="revCounty">—</span> 个县级市逐一反查上海全部路名（含公路、弄、桥），未发现新的遗漏；多出来的匹配都是已收录道路的支弄、地道和桥，以地名缩写命名的公路，或偶然包含该字样的路名。锦州湾路、大凉山路分别以海湾和山脉命名，与杭州湾大道、长白山路一样不计入。</p>
+    <p>未计入的同名词：<span data-stat="exWords"></span>。</p>
+    <p>路名与地名的对应由名称推断，个别道路可能另有出处；同一路名在不同位置分别计数。行政区划与地图边界据公开数据简化绘制，仅作示意。道路数据 © OpenStreetMap 贡献者（ODbL），经 Overture Maps 发布。完整比对表：<a href="data/roads.csv">roads.csv</a> · <a href="data/reverse-check.csv">reverse-check.csv</a> · <a href="https://github.com/titanxxh/shmapcn">源代码</a></p>
+  </div>
+</footer>
+
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>
